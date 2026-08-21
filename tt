@@ -1,730 +1,329 @@
--- ╔══════════════════════════════════════════════╗
--- ║   PRO BOUNTY HUNTER — Blox Fruits           ║
--- ║   Real Hits | Safe Zone Check | Disarmed    ║
--- ║   Mobile UI | Foldable | 6767 gng           ║
--- ╚══════════════════════════════════════════════╝
+-- [[ Blox Fruits God-Tier Auto Bounty Hunter v68 ]] --
+-- Features: Custom Dark UI, PvP-Only Target Filtering, Fast Attack M1, Multi-Weapon Rotation, Auto Haki
 
-local Players          = game:GetService("Players")
-local RunService       = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local TweenService     = game:GetService("TweenService")
-local Workspace        = game:GetService("Workspace")
-local Camera           = Workspace.CurrentCamera
-local LocalPlayer      = Players.LocalPlayer
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local VirtualUser = game:GetService("VirtualUser")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
 
--- ══════════════════════════════════════
---  CONFIG
--- ══════════════════════════════════════
-local CFG = {
-    enabled         = false,
-    minBounty       = 0,
-    onlyDisarmed    = true,    -- ล่าเฉพาะคนที่ไม่มีอาวุธในมือ
-    skipSafeZone    = true,    -- ข้ามคนที่อยู่ใน safe zone
-    targetMode      = "nearest",-- "nearest" | "highest_bounty"
-    attackRange     = 6,       -- ระยะตีจริง (studs)
-    safeStopDist    = 4,       -- หยุด tp เมื่อใกล้เท่านี้
-    loopRate        = 0.05,    -- วินาทีต่อรอบ
-    comboDelay      = 0.25,    -- delay ระหว่างคอมโบ
-    esp             = true,
-    showOnlyTarget  = false,   -- ESP เฉพาะเป้า
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local RootPart = Character:WaitForChild("HumanoidRootPart")
+local Humanoid = Character:WaitForChild("Humanoid")
+
+-- State & Settings
+local Settings = {
+    AutoBounty = false,
+    FastAttack = true,
+    AutoHaki = true,
+    TargetPvPOnly = true,
+    SelectedTargetName = "Auto Nearest",
+    TweenSpeed = 350,
+    AttackDistance = 5, -- ติดตัวเพื่อให้หมัด/สกิลโดน 100%
+    WeaponSequence = {"Melee", "Blox Fruit", "Sword", "Gun"},
+    Skills = {"Z", "X", "C", "V"},
+    SafeZoneCheck = true
 }
 
--- ══════════════════════════════════════
---  SAFE ZONE DETECTION
---  วิธีเช็ค: หา part ชื่อ SafeZone / SpawnLocation
---  หรือเช็คว่า humanoid ถูก lock โดย ForceField
--- ══════════════════════════════════════
-local safeZoneNames = {
-    "SafeZone", "StartZone", "Safezone", "safe_zone",
-    "SpawnLocation", "Town", "StartIsland"
-}
+local CurrentTarget = nil
+local CurrentTween = nil
 
-local function isInSafeZone(player)
-    local char = player.Character
-    if not char then return false end
+-- Character Setup
+LocalPlayer.CharacterAdded:Connect(function(char)
+    Character = char
+    RootPart = char:WaitForChild("HumanoidRootPart")
+    Humanoid = char:WaitForChild("Humanoid")
+end)
 
-    -- วิธีที่ 1: มี ForceField = อยู่ใน safe zone
-    if char:FindFirstChildOfClass("ForceField") then
-        return true
+-- Auto Buso Haki (เกราะ)
+local function EnsureHaki()
+    if not Settings.AutoHaki or not Character then return end
+    if not Character:FindFirstChild("HasBuso") then
+        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+        local commF = remotes and remotes:FindFirstChild("CommF_")
+        if commF then
+            commF:InvokeServer("Buso")
+        end
+    end
+end
+
+-- Check PvP & Safezone Status
+local function IsPvPActive(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then return false end
+    local targetChar = targetPlayer.Character
+    
+    -- Safezone / ForceField Check
+    if targetChar:FindFirstChildOfClass("ForceField") then return false end
+    
+    -- Blox Fruits PvP Flag check
+    local leaderstats = targetPlayer:FindFirstChild("leaderstats")
+    local data = targetPlayer:FindFirstChild("Data")
+    if data and data:FindFirstChild("PvP") and data.PvP.Value == false then
+        return false
+    end
+    
+    return true
+end
+
+-- Equip Weapon Category
+local function EquipWeapon(category)
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if not backpack or not Character then return end
+
+    for _, tool in ipairs(backpack:GetChildren()) do
+        if tool:IsA("Tool") then
+            local toolType = tool:GetAttribute("WeaponType") or tool.ToolTip
+            if toolType == category or (category == "Melee" and tool:FindFirstChild("CombatScript")) or tool.Name:lower():find(category:lower()) then
+                Humanoid:EquipTool(tool)
+                return tool
+            end
+        end
+    end
+    return Character:FindFirstChildOfClass("Tool")
+end
+
+-- Fast Attack M1 Spam
+local function TriggerFastAttack()
+    if not Settings.FastAttack then return end
+    
+    -- Method 1: VirtualUser Click
+    VirtualUser:CaptureController()
+    VirtualUser:Button1Down(Vector2.new(0, 0))
+    VirtualUser:Button1Up(Vector2.new(0, 0))
+    
+    -- Method 2: Combat Framework Register
+    local net = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Net")
+    if net and net:FindFirstChild("RegisterAttack") then
+        net.RegisterAttack:FireServer(0)
+    end
+end
+
+-- Get Valid Target List
+local function GetPlayerList()
+    local list = {"Auto Nearest"}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            table.insert(list, p.Name)
+        end
+    end
+    return list
+end
+
+-- Target Selection
+local function GetTarget()
+    if Settings.SelectedTargetName ~= "Auto Nearest" then
+        local specific = Players:FindFirstChild(Settings.SelectedTargetName)
+        if specific and specific.Character and specific.Character:FindFirstChild("Humanoid") and specific.Character.Humanoid.Health > 0 then
+            if not Settings.TargetPvPOnly or IsPvPActive(specific) then
+                return specific
+            end
+        end
     end
 
-    -- วิธีที่ 2: เช็ค overlap กับ part ชื่อ SafeZone ใน workspace
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return false end
+    local nearest = nil
+    local minDist = math.huge
 
-    for _, obj in ipairs(Workspace:GetDescendants()) do
-        if obj:IsA("BasePart") then
-            local n = obj.Name:lower()
-            for _, szName in ipairs(safeZoneNames) do
-                if n == szName:lower() then
-                    local dist = (root.Position - obj.Position).Magnitude
-                    local size = obj.Size.Magnitude / 2
-                    if dist < size + 5 then
-                        return true
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") then
+            if p.Character.Humanoid.Health > 0 and (not Settings.TargetPvPOnly or IsPvPActive(p)) then
+                local dist = (RootPart.Position - p.Character.HumanoidRootPart.Position).Magnitude
+                if dist < minDist then
+                    minDist = dist
+                    nearest = p
+                end
+            end
+        end
+    end
+    return nearest
+end
+
+-- Tween to Target (Bypass desync)
+local function TweenToTarget(cframe)
+    if not RootPart then return end
+    local dist = (RootPart.Position - cframe.Position).Magnitude
+    local time = dist / Settings.TweenSpeed
+    
+    if CurrentTween then CurrentTween:Cancel() end
+    
+    local tweenInfo = TweenInfo.new(time, Enum.EasingStyle.Linear)
+    CurrentTween = TweenService:Create(RootPart, tweenInfo, {CFrame = cframe})
+    
+    -- Anti-Fall & Noclip
+    for _, part in ipairs(Character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.CanCollide = false
+            part.Velocity = Vector3.new(0, 0, 0)
+        end
+    end
+    
+    CurrentTween:Play()
+end
+
+-- Combat Combo Engine
+local function ExecuteFullCombo(targetChar)
+    local targetHRP = targetChar:FindFirstChild("HumanoidRootPart")
+    local targetHum = targetChar:FindFirstChild("Humanoid")
+    if not targetHRP or not targetHum or targetHum.Health <= 0 then return end
+
+    EnsureHaki()
+
+    -- Cycle All Configured Weapon Types (Melee -> Fruit -> Sword -> Gun)
+    for _, weaponCat in ipairs(Settings.WeaponSequence) do
+        if not Settings.AutoBounty or targetHum.Health <= 0 then break end
+        
+        EquipWeapon(weaponCat)
+        task.wait(0.1)
+
+        -- Aim lock to target
+        RootPart.CFrame = CFrame.new(RootPart.Position, targetHRP.Position)
+
+        -- M1 Attack Burst
+        for i = 1, 4 do
+            TriggerFastAttack()
+            task.wait(0.08)
+        end
+
+        -- Cast Skills
+        for _, skillKey in ipairs(Settings.Skills) do
+            if targetHum.Health <= 0 or not Settings.AutoBounty then break end
+            
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode[skillKey], false, game)
+            task.wait(0.12)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode[skillKey], false, game)
+            task.wait(0.3)
+        end
+    end
+end
+
+-- Main Combat Loop
+task.spawn(function()
+    while true do
+        task.wait(0.05)
+        if Settings.AutoBounty then
+            CurrentTarget = GetTarget()
+            if CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
+                local tHRP = CurrentTarget.Character.HumanoidRootPart
+                local tHum = CurrentTarget.Character:FindFirstChild("Humanoid")
+                
+                if tHum and tHum.Health > 0 then
+                    -- Position locked behind/above target for optimal hit registration
+                    local attackCFrame = tHRP.CFrame * CFrame.new(0, 0, Settings.AttackDistance)
+                    TweenToTarget(attackCFrame)
+                    
+                    if (RootPart.Position - attackCFrame.Position).Magnitude <= 10 then
+                        ExecuteFullCombo(CurrentTarget.Character)
                     end
                 end
             end
         end
     end
-    return false
-end
+end)
 
--- ══════════════════════════════════════
---  DISARMED CHECK
---  เช็คว่า player ไม่มี tool ถืออยู่ในมือ
--- ══════════════════════════════════════
-local function isDisarmed(player)
-    local char = player.Character
-    if not char then return true end
-    -- ถ้ามี Tool ใน character = ถืออยู่
-    local tool = char:FindFirstChildOfClass("Tool")
-    return tool == nil
-end
+-- [[ Modern Custom Dark UI ]] --
+local function BuildUI()
+    local ScreenGui = Instance.new("ScreenGui")
+    ScreenGui.Name = "OnyxBountyUI"
+    ScreenGui.ResetOnSpawn = false
+    
+    local success, coreGui = pcall(function() return game:GetService("CoreGui") end)
+    ScreenGui.Parent = success and coreGui or LocalPlayer:WaitForChild("PlayerGui")
 
--- ══════════════════════════════════════
---  UTILS
--- ══════════════════════════════════════
-local function getRoot(p)
-    local c = p.Character
-    return c and c:FindFirstChild("HumanoidRootPart")
-end
-local function getHum(p)
-    local c = p.Character
-    return c and c:FindFirstChildOfClass("Humanoid")
-end
-local function isAlive(p)
-    local h = getHum(p)
-    return h and h.Health > 0
-end
-local function getBounty(p)
-    local ls = p:FindFirstChild("leaderstats")
-    if ls then
-        local b = ls:FindFirstChild("Bounty") or ls:FindFirstChild("bounty")
-        if b then return b.Value end
-    end
-    return 0
-end
+    local MainFrame = Instance.new("Frame")
+    MainFrame.Size = UDim2.new(0, 320, 0, 380)
+    MainFrame.Position = UDim2.new(0.5, -160, 0.3, 0)
+    MainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+    MainFrame.BorderSizePixel = 0
+    MainFrame.Active = true
+    MainFrame.Draggable = true
+    MainFrame.Parent = ScreenGui
 
--- ══════════════════════════════════════
---  TARGET FINDER
--- ══════════════════════════════════════
-local currentTarget = nil
+    local UICorner = Instance.new("UICorner", MainFrame)
+    UICorner.CornerRadius = UDim.new(0, 10)
 
-local function findTarget()
-    local myRoot = getRoot(LocalPlayer)
-    if not myRoot then return nil end
+    local UIStroke = Instance.new("UIStroke", MainFrame)
+    UIStroke.Color = Color3.fromRGB(70, 70, 90)
+    UIStroke.Thickness = 1.5
 
-    local best, bestVal = nil, nil
+    -- Title
+    local Title = Instance.new("TextLabel", MainFrame)
+    Title.Size = UDim2.new(1, 0, 0, 40)
+    Title.Text = "ONYX BOUNTY HUNTER v68"
+    Title.TextColor3 = Color3.fromRGB(240, 240, 255)
+    Title.Font = Enum.Font.GothamBold
+    Title.TextSize = 14
+    Title.BackgroundTransparency = 1
 
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p == LocalPlayer then continue end
-        if not isAlive(p) then continue end
+    local Layout = Instance.new("UIListLayout", MainFrame)
+    Layout.SortOrder = Enum.SortOrder.LayoutOrder
+    Layout.Padding = UDim.new(0, 8)
+    Layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 
-        local bounty = getBounty(p)
-        if bounty < CFG.minBounty then continue end
-
-        -- Safe zone check
-        if CFG.skipSafeZone and isInSafeZone(p) then continue end
-
-        -- Disarmed check
-        if CFG.onlyDisarmed and not isDisarmed(p) then continue end
-
-        local r = getRoot(p)
-        if not r then continue end
-
-        local dist = (myRoot.Position - r.Position).Magnitude
-
-        if CFG.targetMode == "nearest" then
-            if not bestVal or dist < bestVal then
-                best, bestVal = p, dist
-            end
-        elseif CFG.targetMode == "highest_bounty" then
-            if not bestVal or bounty > bestVal then
-                best, bestVal = p, bounty
-            end
-        end
-    end
-    return best
-end
-
--- ══════════════════════════════════════
---  MOVEMENT — TP เข้าหาเป้า
--- ══════════════════════════════════════
-local function moveTo(target)
-    local myRoot  = getRoot(LocalPlayer)
-    local tRoot   = getRoot(target)
-    if not myRoot or not tRoot then return end
-
-    local dist = (myRoot.Position - tRoot.Position).Magnitude
-    if dist > CFG.safeStopDist + 1 then
-        -- TP ไปข้างหน้าของเป้า offset เล็กน้อย
-        local dir    = (myRoot.Position - tRoot.Position).Unit
-        local newPos = tRoot.Position + dir * CFG.safeStopDist
-        myRoot.CFrame = CFrame.new(newPos + Vector3.new(0, 2, 0),
-                                   tRoot.Position)
-    end
-end
-
--- ══════════════════════════════════════
---  COMBAT — Real M1 via VirtualInput
---  ใช้ VirtualInputManager ให้ Roblox
---  รับ click จริง ไม่ใช่แค่ call function
--- ══════════════════════════════════════
-local VIM = game:GetService("VirtualInputManager")
-
-local comboStep  = 0
-local lastHit    = 0
-local skillQueue = {
-    { key = Enum.KeyCode.Z, delay = 0.1 },
-    { key = Enum.KeyCode.X, delay = 0.1 },
-    { key = Enum.KeyCode.F, delay = 0.15 },
-}
-
-local function fireM1()
-    VIM:SendMouseButtonEvent(0, 0, 0, true,  game, 1)
-    task.wait(0.06)
-    VIM:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-end
-
-local function fireSkill(keyCode)
-    VIM:SendKeyEvent(true,  keyCode, false, game)
-    task.wait(0.05)
-    VIM:SendKeyEvent(false, keyCode, false, game)
-end
-
--- Look at target ก่อน attack
-local function lookAt(target)
-    local myRoot = getRoot(LocalPlayer)
-    local tRoot  = getRoot(target)
-    if not myRoot or not tRoot then return end
-    myRoot.CFrame = CFrame.lookAt(myRoot.Position, tRoot.Position)
-end
-
-local function doAttack(target)
-    local now = tick()
-    if now - lastHit < CFG.comboDelay then return end
-    lastHit = now
-
-    lookAt(target)
-    comboStep = comboStep + 1
-
-    if comboStep <= 4 then
-        -- M1 combo
-        fireM1()
-    elseif comboStep == 5 then
-        fireSkill(skillQueue[1].key)
-    elseif comboStep == 6 then
-        fireSkill(skillQueue[2].key)
-    elseif comboStep == 7 then
-        fireSkill(skillQueue[3].key)
-        comboStep = 0
-    end
-end
-
--- ══════════════════════════════════════
---  ESP SYSTEM
--- ══════════════════════════════════════
-local espPool = {}
-
-local function clearESP(p)
-    if espPool[p] then
-        pcall(function()
-            if espPool[p].bb then espPool[p].bb:Destroy() end
-            if espPool[p].line then espPool[p].line:Remove() end
+    local function CreateButton(text, defaultState, callback)
+        local btn = Instance.new("TextButton", MainFrame)
+        btn.Size = UDim2.new(0.9, 0, 0, 38)
+        btn.BackgroundColor3 = defaultState and Color3.fromRGB(45, 120, 75) or Color3.fromRGB(35, 35, 45)
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.Font = Enum.Font.GothamMedium
+        btn.TextSize = 13
+        btn.Text = text .. ": " .. (defaultState and "ON" or "OFF")
+        
+        local btnCorner = Instance.new("UICorner", btn)
+        btnCorner.CornerRadius = UDim.new(0, 6)
+        
+        local state = defaultState
+        btn.MouseButton1Click:Connect(function()
+            state = not state
+            btn.BackgroundColor3 = state and Color3.fromRGB(45, 120, 75) or Color3.fromRGB(35, 35, 45)
+            btn.Text = text .. ": " .. (state and "ON" or "OFF")
+            callback(state)
         end)
-        espPool[p] = nil
-    end
-end
-
-local function buildESP(p)
-    clearESP(p)
-    local char = p.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-
-    -- BillboardGui
-    local bb = Instance.new("BillboardGui")
-    bb.Name           = "PBH_ESP"
-    bb.AlwaysOnTop    = true
-    bb.Size           = UDim2.new(0, 80, 0, 100)
-    bb.StudsOffset    = Vector3.new(0, 3.5, 0)
-    bb.Adornee        = root
-    bb.Parent         = game.CoreGui
-    bb.ResetOnSpawn   = false
-
-    -- Box outline
-    local box = Instance.new("Frame", bb)
-    box.Size              = UDim2.new(1,0,1,0)
-    box.BackgroundTransparency = 1
-    box.BorderSizePixel   = 2
-    box.BorderColor3      = Color3.fromRGB(255, 50, 50)
-
-    -- Name
-    local nameLbl = Instance.new("TextLabel", bb)
-    nameLbl.Size              = UDim2.new(1,0,0,18)
-    nameLbl.Position          = UDim2.new(0,0,-0.22,0)
-    nameLbl.BackgroundTransparency = 1
-    nameLbl.Text              = p.Name
-    nameLbl.TextColor3        = Color3.fromRGB(255, 255, 80)
-    nameLbl.Font              = Enum.Font.GothamBold
-    nameLbl.TextScaled        = true
-
-    -- Info (bounty + status)
-    local infoLbl = Instance.new("TextLabel", bb)
-    infoLbl.Size              = UDim2.new(1,0,0,14)
-    infoLbl.Position          = UDim2.new(0,0,1.05,0)
-    infoLbl.BackgroundTransparency = 1
-    infoLbl.Font              = Enum.Font.Gotham
-    infoLbl.TextScaled        = true
-    infoLbl.TextColor3        = Color3.fromRGB(80, 255, 120)
-
-    -- HP bar BG
-    local hpBg = Instance.new("Frame", bb)
-    hpBg.Size             = UDim2.new(0.1,0,1,0)
-    hpBg.Position         = UDim2.new(-0.14,0,0,0)
-    hpBg.BackgroundColor3 = Color3.fromRGB(40,40,40)
-    hpBg.BorderSizePixel  = 0
-    Instance.new("UICorner", hpBg).CornerRadius = UDim.new(0,2)
-
-    local hpFill = Instance.new("Frame", hpBg)
-    hpFill.Size           = UDim2.new(1,0,1,0)
-    hpFill.AnchorPoint    = Vector2.new(0,1)
-    hpFill.Position       = UDim2.new(0,0,1,0)
-    hpFill.BackgroundColor3 = Color3.fromRGB(50,220,80)
-    hpFill.BorderSizePixel = 0
-    Instance.new("UICorner", hpFill).CornerRadius = UDim.new(0,2)
-
-    -- Tracer (Drawing API)
-    local line = Drawing.new("Line")
-    line.Color       = Color3.fromRGB(255, 100, 200)
-    line.Thickness   = 1
-    line.Transparency = 0.4
-    line.Visible     = true
-
-    espPool[p] = { bb=bb, infoLbl=infoLbl, hpFill=hpFill, line=line, box=box }
-end
-
-local function updateESP()
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p == LocalPlayer then continue end
-
-        if not CFG.esp then
-            clearESP(p)
-            continue
-        end
-
-        if CFG.showOnlyTarget and p ~= currentTarget then
-            clearESP(p)
-            continue
-        end
-
-        local char = p.Character
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        local hum  = char and char:FindFirstChildOfClass("Humanoid")
-
-        if not root or not hum then
-            clearESP(p)
-            continue
-        end
-
-        if not espPool[p] then buildESP(p) end
-        local obj = espPool[p]
-        if not obj then continue end
-
-        -- Update bb adornee
-        obj.bb.Adornee = root
-
-        -- HP bar
-        local pct = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
-        obj.hpFill.Size = UDim2.new(1, 0, pct, 0)
-        obj.hpFill.BackgroundColor3 = Color3.fromRGB(
-            math.floor((1-pct)*255), math.floor(pct*200), 40
-        )
-
-        -- Info label
-        local myRoot = getRoot(LocalPlayer)
-        local dist   = myRoot and math.floor((myRoot.Position - root.Position).Magnitude) or 0
-        local szTag  = isInSafeZone(p) and "🛡SZ" or ""
-        local disTag = isDisarmed(p) and "🔓" or "🔫"
-        local bounty = getBounty(p)
-        obj.infoLbl.Text = string.format("💰%d %s%s 📏%d", bounty, disTag, szTag, dist)
-
-        -- Highlight current target
-        if p == currentTarget then
-            obj.box.BorderColor3 = Color3.fromRGB(255, 200, 0)
-        else
-            obj.box.BorderColor3 = Color3.fromRGB(255, 50, 50)
-        end
-
-        -- Tracer
-        local screenPos, onScreen = Camera:WorldToViewportPoint(root.Position)
-        obj.line.From    = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y - 10)
-        obj.line.To      = Vector2.new(screenPos.X, screenPos.Y)
-        obj.line.Visible = onScreen
-
-    end
-end
-
--- Clean up ESP on player leave
-Players.PlayerRemoving:Connect(clearESP)
-
--- ══════════════════════════════════════
---  MAIN LOOP
--- ══════════════════════════════════════
-RunService.Heartbeat:Connect(function()
-    -- ESP update ทุก frame
-    updateESP()
-
-    if not CFG.enabled then
-        currentTarget = nil
-        return
     end
 
-    local myHum = getHum(LocalPlayer)
-    if not myHum or myHum.Health <= 0 then
-        currentTarget = nil
-        return
-    end
-
-    -- หาเป้าใหม่ทุกรอบ
-    currentTarget = findTarget()
-    if not currentTarget then return end
-
-    local myRoot = getRoot(LocalPlayer)
-    local tRoot  = getRoot(currentTarget)
-    if not myRoot or not tRoot then return end
-
-    local dist = (myRoot.Position - tRoot.Position).Magnitude
-
-    -- เข้าหาเป้า
-    if dist > CFG.safeStopDist then
-        moveTo(currentTarget)
-    end
-
-    -- ตีจริง เมื่ออยู่ในระยะ
-    if dist <= CFG.attackRange then
-        doAttack(currentTarget)
-    end
-end)
-
--- ══════════════════════════════════════
---  GUI — Mobile Ready + Foldable
--- ══════════════════════════════════════
-local gui = Instance.new("ScreenGui", game.CoreGui)
-gui.Name            = "ProBountyHunter"
-gui.ResetOnSpawn    = false
-gui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
-gui.IgnoreGuiInset  = true
-
--- ── MAIN PANEL ──
-local PANEL_W, PANEL_H = 280, 460
-local panel = Instance.new("Frame", gui)
-panel.Size             = UDim2.new(0, PANEL_W, 0, PANEL_H)
-panel.Position         = UDim2.new(0.5, -PANEL_W/2, 0.5, -PANEL_H/2)
-panel.BackgroundColor3 = Color3.fromRGB(12, 12, 20)
-panel.BorderSizePixel  = 0
-panel.Active           = true
-panel.Draggable        = true
-Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 12)
-
-local panelStroke = Instance.new("UIStroke", panel)
-panelStroke.Color     = Color3.fromRGB(220, 50, 90)
-panelStroke.Thickness = 1.8
-
--- Shadow
-local shadow = Instance.new("ImageLabel", panel)
-shadow.Size            = UDim2.new(1, 24, 1, 24)
-shadow.Position        = UDim2.new(0, -12, 0, -12)
-shadow.BackgroundTransparency = 1
-shadow.Image           = "rbxassetid://6014261993"
-shadow.ImageColor3     = Color3.fromRGB(0,0,0)
-shadow.ImageTransparency = 0.5
-shadow.ScaleType       = Enum.ScaleType.Slice
-shadow.SliceCenter     = Rect.new(49,49,450,450)
-shadow.ZIndex          = -1
-
--- ── HEADER ──
-local header = Instance.new("Frame", panel)
-header.Size             = UDim2.new(1,0,0,44)
-header.BackgroundColor3 = Color3.fromRGB(200, 30, 70)
-header.BorderSizePixel  = 0
-Instance.new("UICorner", header).CornerRadius = UDim.new(0, 12)
-
--- Fix bottom corners of header
-local headerFix = Instance.new("Frame", header)
-headerFix.Size             = UDim2.new(1,0,0.5,0)
-headerFix.Position         = UDim2.new(0,0,0.5,0)
-headerFix.BackgroundColor3 = Color3.fromRGB(200, 30, 70)
-headerFix.BorderSizePixel  = 0
-
-local titleLbl = Instance.new("TextLabel", header)
-titleLbl.Size              = UDim2.new(1,-50,1,0)
-titleLbl.Position          = UDim2.new(0,12,0,0)
-titleLbl.BackgroundTransparency = 1
-titleLbl.Text              = "🎯 PRO BOUNTY HUNTER"
-titleLbl.TextColor3        = Color3.fromRGB(255,255,255)
-titleLbl.Font              = Enum.Font.GothamBold
-titleLbl.TextScaled        = true
-titleLbl.TextXAlignment    = Enum.TextXAlignment.Left
-
--- ── FOLD BUTTON ──
-local isOpen   = true
-local foldBtn  = Instance.new("TextButton", header)
-foldBtn.Size              = UDim2.new(0, 36, 0, 30)
-foldBtn.Position          = UDim2.new(1,-42,0.5,-15)
-foldBtn.BackgroundColor3  = Color3.fromRGB(255,255,255)
-foldBtn.TextColor3        = Color3.fromRGB(200,30,70)
-foldBtn.Text              = "▲"
-foldBtn.Font              = Enum.Font.GothamBold
-foldBtn.TextScaled        = true
-foldBtn.BorderSizePixel   = 0
-foldBtn.ZIndex            = 5
-Instance.new("UICorner", foldBtn).CornerRadius = UDim.new(0, 6)
-
--- Content container (พับได้)
-local content = Instance.new("Frame", panel)
-content.Name              = "Content"
-content.Size              = UDim2.new(1,0,1,-44)
-content.Position          = UDim2.new(0,0,0,44)
-content.BackgroundTransparency = 1
-content.ClipsDescendants  = true
-
--- Fold animation
-foldBtn.MouseButton1Click:Connect(function()
-    isOpen = not isOpen
-    local targetH  = isOpen and PANEL_H     or 44
-    local targetCH = isOpen and PANEL_H-44  or 0
-
-    TweenService:Create(panel,
-        TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
-        { Size = UDim2.new(0, PANEL_W, 0, targetH) }
-    ):Play()
-    TweenService:Create(content,
-        TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
-        { Size = UDim2.new(1, 0, 0, targetCH) }
-    ):Play()
-
-    foldBtn.Text = isOpen and "▲" or "▼"
-end)
-
--- ── SCROLL FRAME (รองรับ content เยอะ) ──
-local scroll = Instance.new("ScrollingFrame", content)
-scroll.Size              = UDim2.new(1,0,1,0)
-scroll.BackgroundTransparency = 1
-scroll.BorderSizePixel   = 0
-scroll.ScrollBarThickness = 4
-scroll.ScrollBarImageColor3 = Color3.fromRGB(200,30,70)
-scroll.CanvasSize        = UDim2.new(0,0,0,0) -- auto จะ set
-scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-
-local listLayout = Instance.new("UIListLayout", scroll)
-listLayout.Padding        = UDim.new(0,6)
-listLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-
-local listPad = Instance.new("UIPadding", scroll)
-listPad.PaddingTop    = UDim.new(0,8)
-listPad.PaddingBottom = UDim.new(0,8)
-listPad.PaddingLeft   = UDim.new(0,10)
-listPad.PaddingRight  = UDim.new(0,10)
-
--- ── STATUS BAR ──
-local statusBar = Instance.new("Frame", scroll)
-statusBar.Size             = UDim2.new(1,0,0,38)
-statusBar.BackgroundColor3 = Color3.fromRGB(20,20,32)
-statusBar.BorderSizePixel  = 0
-Instance.new("UICorner", statusBar).CornerRadius = UDim.new(0,8)
-Instance.new("UIStroke", statusBar).Color        = Color3.fromRGB(60,60,80)
-
-local statusLbl = Instance.new("TextLabel", statusBar)
-statusLbl.Size              = UDim2.new(1,0,1,0)
-statusLbl.BackgroundTransparency = 1
-statusLbl.Text              = "⭕ IDLE — ไม่มีเป้า"
-statusLbl.TextColor3        = Color3.fromRGB(160,160,180)
-statusLbl.Font              = Enum.Font.Gotham
-statusLbl.TextScaled        = true
-
--- Update status ทุก 0.5 วิ
-task.spawn(function()
-    while task.wait(0.5) do
-        if CFG.enabled and currentTarget then
-            local myR = getRoot(LocalPlayer)
-            local tR  = getRoot(currentTarget)
-            local dist = (myR and tR) and
-                math.floor((myR.Position - tR.Position).Magnitude) or 0
-            statusLbl.Text = string.format(
-                "🔴 HUNTING: %s | 📏 %d studs", currentTarget.Name, dist)
-            statusLbl.TextColor3 = Color3.fromRGB(255, 100, 100)
-        elseif CFG.enabled then
-            statusLbl.Text      = "🟡 หาเป้า..."
-            statusLbl.TextColor3 = Color3.fromRGB(255, 200, 60)
-        else
-            statusLbl.Text      = "⭕ IDLE"
-            statusLbl.TextColor3 = Color3.fromRGB(160,160,180)
-        end
-    end
-end)
-
--- ── HELPER: สร้าง Toggle ──
-local function makeToggle(parent, labelText, configKey, onColor)
-    onColor = onColor or Color3.fromRGB(50, 200, 90)
-
-    local row = Instance.new("Frame", parent)
-    row.Size             = UDim2.new(1,0,0,40)
-    row.BackgroundColor3 = Color3.fromRGB(18,18,30)
-    row.BorderSizePixel  = 0
-    Instance.new("UICorner", row).CornerRadius = UDim.new(0,8)
-
-    local lbl = Instance.new("TextLabel", row)
-    lbl.Size              = UDim2.new(0.62,0,1,0)
-    lbl.Position          = UDim2.new(0,10,0,0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text              = labelText
-    lbl.TextColor3        = Color3.fromRGB(210,210,230)
-    lbl.Font              = Enum.Font.Gotham
-    lbl.TextScaled        = true
-    lbl.TextXAlignment    = Enum.TextXAlignment.Left
-
-    -- Toggle pill
-    local pill = Instance.new("Frame", row)
-    pill.Size             = UDim2.new(0,52,0,26)
-    pill.Position         = UDim2.new(1,-62,0.5,-13)
-    pill.BackgroundColor3 = Color3.fromRGB(60,60,60)
-    pill.BorderSizePixel  = 0
-    Instance.new("UICorner", pill).CornerRadius = UDim.new(1,0)
-
-    local knob = Instance.new("Frame", pill)
-    knob.Size             = UDim2.new(0,22,0,22)
-    knob.Position         = UDim2.new(0,2,0.5,-11)
-    knob.BackgroundColor3 = Color3.fromRGB(200,200,200)
-    knob.BorderSizePixel  = 0
-    Instance.new("UICorner", knob).CornerRadius = UDim.new(1,0)
-
-    local function refresh()
-        local on = CFG[configKey]
-        TweenService:Create(pill, TweenInfo.new(0.15),
-            { BackgroundColor3 = on and onColor or Color3.fromRGB(60,60,60) }):Play()
-        TweenService:Create(knob, TweenInfo.new(0.15),
-            { Position = on and UDim2.new(1,-24,0.5,-11)
-                             or UDim2.new(0,2,0.5,-11) }):Play()
-    end
-    refresh()
-
-    -- ทำให้ทั้ง row กดได้ (รองรับมือถือ)
-    local btn = Instance.new("TextButton", row)
-    btn.Size              = UDim2.new(1,0,1,0)
-    btn.BackgroundTransparency = 1
-    btn.Text              = ""
-    btn.ZIndex            = 2
-
-    btn.MouseButton1Click:Connect(function()
-        CFG[configKey] = not CFG[configKey]
-        refresh()
+    -- Controls
+    CreateButton("Auto Bounty Hunt", Settings.AutoBounty, function(val)
+        Settings.AutoBounty = val
+        if not val and CurrentTween then CurrentTween:Cancel() end
     end)
 
-    return row
+    CreateButton("Target PvP Players Only", Settings.TargetPvPOnly, function(val)
+        Settings.TargetPvPOnly = val
+    end)
+
+    CreateButton("Fast Attack (M1 Spam)", Settings.FastAttack, function(val)
+        Settings.FastAttack = val
+    end)
+
+    CreateButton("Auto Buso Haki", Settings.AutoHaki, function(val)
+        Settings.AutoHaki = val
+    end)
+
+    -- Target Selector Display
+    local TargetLabel = Instance.new("TextLabel", MainFrame)
+    TargetLabel.Size = UDim2.new(0.9, 0, 0, 32)
+    TargetLabel.BackgroundColor3 = Color3.fromRGB(28, 28, 35)
+    TargetLabel.TextColor3 = Color3.fromRGB(200, 200, 220)
+    TargetLabel.Font = Enum.Font.Gotham
+    TargetLabel.TextSize = 12
+    TargetLabel.Text = "Target: Auto Nearest (PvP Active)"
+    local tCorner = Instance.new("UICorner", TargetLabel)
+    tCorner.CornerRadius = UDim.new(0, 6)
+
+    -- Status Updater
+    task.spawn(function()
+        while ScreenGui.Parent do
+            task.wait(0.5)
+            if CurrentTarget and CurrentTarget.Character then
+                TargetLabel.Text = "Hunting: " .. CurrentTarget.Name .. " (" .. tostring(math.floor(CurrentTarget.Character.Humanoid.Health)) .. " HP)"
+            else
+                TargetLabel.Text = "Status: Searching for PvP targets..."
+            end
+        end
+    end)
 end
 
--- ── HELPER: Section label ──
-local function makeSection(parent, text)
-    local lbl = Instance.new("TextLabel", parent)
-    lbl.Size              = UDim2.new(1,0,0,22)
-    lbl.BackgroundTransparency = 1
-    lbl.Text              = text
-    lbl.TextColor3        = Color3.fromRGB(220, 50, 90)
-    lbl.Font              = Enum.Font.GothamBold
-    lbl.TextScaled        = true
-    lbl.TextXAlignment    = Enum.TextXAlignment.Left
-end
-
--- ── BIG START/STOP BUTTON ──
-local startBtn = Instance.new("TextButton", scroll)
-startBtn.Size             = UDim2.new(1,0,0,50)
-startBtn.BackgroundColor3 = Color3.fromRGB(220, 40, 80)
-startBtn.Text             = "▶  START HUNTING"
-startBtn.TextColor3       = Color3.fromRGB(255,255,255)
-startBtn.Font             = Enum.Font.GothamBold
-startBtn.TextScaled       = true
-startBtn.BorderSizePixel  = 0
-Instance.new("UICorner", startBtn).CornerRadius = UDim.new(0,10)
-Instance.new("UIStroke", startBtn).Color        = Color3.fromRGB(255,80,120)
-
-startBtn.MouseButton1Click:Connect(function()
-    CFG.enabled = not CFG.enabled
-    if CFG.enabled then
-        startBtn.Text             = "⏹  STOP HUNTING"
-        startBtn.BackgroundColor3 = Color3.fromRGB(60,60,80)
-    else
-        startBtn.Text             = "▶  START HUNTING"
-        startBtn.BackgroundColor3 = Color3.fromRGB(220,40,80)
-        comboStep = 0
-    end
-end)
-
--- ── SECTIONS ──
-makeSection(scroll, "  ⚙️ เป้าหมาย")
-makeToggle(scroll, "🔓 เฉพาะคนไม่มีอาวุธ", "onlyDisarmed", Color3.fromRGB(255,160,0))
-makeToggle(scroll, "🛡 ข้ามคนใน Safe Zone",  "skipSafeZone",  Color3.fromRGB(60,180,255))
-
--- Target mode toggle
-local modeRow = Instance.new("Frame", scroll)
-modeRow.Size             = UDim2.new(1,0,0,40)
-modeRow.BackgroundColor3 = Color3.fromRGB(18,18,30)
-modeRow.BorderSizePixel  = 0
-Instance.new("UICorner", modeRow).CornerRadius = UDim.new(0,8)
-
-local modeLbl2 = Instance.new("TextLabel", modeRow)
-modeLbl2.Size              = UDim2.new(0.5,0,1,0)
-modeLbl2.Position          = UDim2.new(0,10,0,0)
-modeLbl2.BackgroundTransparency = 1
-modeLbl2.Text              = "🎯 เลือกเป้า"
-modeLbl2.TextColor3        = Color3.fromRGB(210,210,230)
-modeLbl2.Font              = Enum.Font.Gotham
-modeLbl2.TextScaled        = true
-modeLbl2.TextXAlignment    = Enum.TextXAlignment.Left
-
-local modeVal = Instance.new("TextButton", modeRow)
-modeVal.Size              = UDim2.new(0,90,0,28)
-modeVal.Position          = UDim2.new(1,-100,0.5,-14)
-modeVal.Text              = "Nearest"
-modeVal.Font              = Enum.Font.GothamBold
-modeVal.TextScaled        = true
-modeVal.BorderSizePixel   = 0
-modeVal.BackgroundColor3  = Color3.fromRGB(60,80,200)
-modeVal.TextColor3        = Color3.fromRGB(255,255,255)
-Instance.new("UICorner", modeVal).CornerRadius = UDim.new(0,6)
-
-modeVal.MouseButton1Click:Connect(function()
-    if CFG.targetMode == "nearest" then
-        CFG.targetMode = "highest_bounty"
-        modeVal.Text = "High 💰"
-        modeVal.BackgroundColor3 = Color3.fromRGB(160,120,0)
-    else
-        CFG.targetMode = "nearest"
-        modeVal.Text = "Nearest"
-        modeVal.BackgroundColor3 = Color3.fromRGB(60,80,200)
-    end
-end)
-
-makeSection(scroll, "  ⚔️ การต่อสู้")
-makeToggle(scroll, "👊 Auto Combo Attack", "autoCombo", Color3.fromRGB(255,60,60))
-
-makeSection(scroll, "  📡 Visual")
-makeToggle(scroll, "📡 ESP ทุกผู้เล่น",         "esp",            Color3.fromRGB(100,100,255))
-makeToggle(scroll, "🎯 ESP เฉพาะเป้า",           "showOnlyTarget", Color3.fromRGB(180,60,255))
-
--- ── ข้อมูล script ──
-local infoLbl2 = Instance.new("TextLabel", scroll)
-infoLbl2.Size              = UDim2.new(1,0,0,28)
-infoLbl2.BackgroundColor3  = Color3.fromRGB(18,18,30)
-infoLbl2.Text              = "6767  •  Pro BH  •  Mobile Ready"
-infoLbl2.TextColor3        = Color3.fromRGB(80,80,100)
-infoLbl2.Font              = Enum.Font.Gotham
-infoLbl2.TextScaled        = true
-infoLbl2.BorderSizePixel   = 0
-Instance.new("UICorner", infoLbl2).CornerRadius = UDim.new(0,6)
-
-print("╔══════════════════════════════════╗")
-print("║  PRO BOUNTY HUNTER — LOADED ✅   ║")
-print("║  SafeZone ✓ | Disarmed ✓        ║")
-print("║  Mobile ✓  | Foldable ✓  6767  ║")
-print("╚══════════════════════════════════╝")
+BuildUI()
