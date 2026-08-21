@@ -1,10 +1,9 @@
--- [[ Blox Fruits Stable Overhead Bounty Hunter v68 (Fixed Combat & Aimlock) ]] --
--- Architecture: Overhead Hover (Y+11), BodyVelocity Anchor, Perfected Aimlock & Parallel Combat
+-- [[ Blox Fruits Anti-Rubberband Velocity Flight & Bounty Engine v68 ]] --
+-- Features: Physics BodyVelocity Flight (No Rubberband), Noclip Wall Penetration, Overhead Lock (Y+11), Zero-Delay Combat
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
 local VirtualUser = game:GetService("VirtualUser")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -19,7 +18,7 @@ local Humanoid = Character:WaitForChild("Humanoid")
 local Config = {
     Enabled = false,
     OverheadDistance = 11,   -- ความสูงเหนือหัวเป้าหมาย (studs)
-    FlySpeed = 300,
+    FlySpeed = 350,          -- ความเร็วในการบินพุ่งเข้าหา (studs/s)
     FastAttack = true,
     AutoHaki = true,
     SkillSpam = true,
@@ -28,32 +27,32 @@ local Config = {
 }
 
 local CurrentTarget = nil
-local BodyVel = nil
+local FlightVelocity = nil
 local CombatFramework = nil
 local ActiveController = nil
 
--- [[ Anti-Fall / Anti-Physics Desync (BodyVelocity Anchor) ]] --
-local function EnsurePhysicsAnchor()
+-- [[ Physics Flight Controller (ป้องกันการโดนดึงกลับ 100%) ]] --
+local function EnsureFlightEngine()
     if not RootPart then return end
-    if not BodyVel or BodyVel.Parent ~= RootPart then
-        if BodyVel then BodyVel:Destroy() end
-        BodyVel = Instance.new("BodyVelocity")
-        BodyVel.Name = "OnyxAnchor"
-        BodyVel.Velocity = Vector3.new(0, 0, 0)
-        BodyVel.MaxForce = Vector3.new(9e9, 9e9, 9e9)
-        BodyVel.P = 1250
-        BodyVel.Parent = RootPart
+    if not FlightVelocity or FlightVelocity.Parent ~= RootPart then
+        if FlightVelocity then FlightVelocity:Destroy() end
+        FlightVelocity = Instance.new("BodyVelocity")
+        FlightVelocity.Name = "OnyxFlight"
+        FlightVelocity.Velocity = Vector3.new(0, 0, 0)
+        FlightVelocity.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+        FlightVelocity.P = 2000
+        FlightVelocity.Parent = RootPart
     end
 end
 
-local function RemovePhysicsAnchor()
-    if BodyVel then
-        BodyVel:Destroy()
-        BodyVel = nil
+local function StopFlightEngine()
+    if FlightVelocity then
+        FlightVelocity:Destroy()
+        FlightVelocity = nil
     end
 end
 
--- [[ Infinite Noclip Loop (Stepped) ]] --
+-- [[ Infinite Noclip (ทะลุทุกอย่าง ไม่ติดแมพ) ]] --
 RunService.Stepped:Connect(function()
     if Config.Enabled and Character then
         for _, part in ipairs(Character:GetDescendants()) do
@@ -61,9 +60,8 @@ RunService.Stepped:Connect(function()
                 part.CanCollide = false
             end
         end
-        if RootPart then
-            RootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            RootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        if Humanoid then
+            Humanoid:ChangeState(Enum.HumanoidStateType.Physics)
         end
     end
 end)
@@ -74,20 +72,17 @@ LocalPlayer.CharacterAdded:Connect(function(char)
     RootPart = char:WaitForChild("HumanoidRootPart")
     Humanoid = char:WaitForChild("Humanoid")
     task.wait(0.5)
-    EnsurePhysicsAnchor()
+    EnsureFlightEngine()
 end)
 
--- [[ Hook Blox Fruits Combat Controller (Real Damage Hits) ]] --
-local function SetupCombatHooks()
-    pcall(function()
-        local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
-        if playerScripts and playerScripts:FindFirstChild("CombatFramework") then
-            CombatFramework = require(playerScripts.CombatFramework)
-            ActiveController = CombatFramework.activeController
-        end
-    end)
-end
-SetupCombatHooks()
+-- [[ Hook Combat Framework ]] --
+pcall(function()
+    local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
+    if playerScripts and playerScripts:FindFirstChild("CombatFramework") then
+        CombatFramework = require(playerScripts.CombatFramework)
+        ActiveController = CombatFramework.activeController
+    end
+end)
 
 -- [[ Auto Buso Haki ]] --
 local function CheckHaki()
@@ -122,7 +117,7 @@ local function IsInSafeZone(pos)
     return false
 end
 
--- [[ Strict Single Target Selection ]] --
+-- [[ Target Selector ]] --
 local function GetBestTarget()
     local best = nil
     local shortest = math.huge
@@ -147,7 +142,7 @@ local function GetBestTarget()
     return best
 end
 
--- [[ Auto Equip Best Weapon ]] --
+-- [[ Auto Equip Weapon ]] --
 local function EquipPreferredWeapon()
     local backpack = LocalPlayer:FindFirstChild("Backpack")
     if not backpack or not Character then return end
@@ -167,16 +162,15 @@ local function EquipPreferredWeapon()
     end
 end
 
--- [[ AimLock Directly onto Target (Camera + Character) ]] --
+-- [[ AimLock Camera ]] --
 local function AimAtTarget(targetPosition)
     Camera.CFrame = CFrame.new(Camera.CFrame.Position, targetPosition)
 end
 
--- [[ Real Fast Attack Registration (Extended Hitbox) ]] --
+-- [[ Real Fast Attack Registration ]] --
 local function ExecuteFastAttack()
     if not Config.FastAttack then return end
 
-    -- 1. In-game Controller Attack Trigger with Boosted Hitbox
     if ActiveController and ActiveController.attack then
         pcall(function()
             ActiveController.timeToNextAttack = 0
@@ -185,7 +179,6 @@ local function ExecuteFastAttack()
         end)
     end
 
-    -- 2. Tool Activate & Hardware Emulation Fallback
     local currentTool = Character:FindFirstChildOfClass("Tool")
     if currentTool then
         currentTool:Activate()
@@ -195,31 +188,33 @@ local function ExecuteFastAttack()
     VirtualUser:Button1Down(Vector2.new(0, 0))
     VirtualUser:Button1Up(Vector2.new(0, 0))
 
-    -- 3. Remote Event Trigger
     local net = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Net")
     if net and net:FindFirstChild("RegisterAttack") then
         net.RegisterAttack:FireServer(0)
     end
 end
 
--- [[ Smooth Overhead Flight Movement ]] --
-local function HoverOverhead(targetHRP)
-    EnsurePhysicsAnchor()
+-- [[ Physics-Based Smooth Fly & Overhead Lock Engine ]] --
+local function HandleMovement(targetHRP)
+    EnsureFlightEngine()
     
-    -- Target overhead position: 11 studs directly above the target, aiming downward directly at target
-    local overheadCFrame = CFrame.new(targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0), targetHRP.Position)
+    local targetOverheadPos = targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0)
     local currentPos = RootPart.Position
-    local targetPos = overheadCFrame.Position
-    local dist = (currentPos - targetPos).Magnitude
+    local direction = (targetOverheadPos - currentPos)
+    local distance = direction.Magnitude
 
-    if dist > 150 then
-        RootPart.CFrame = CFrame.new(currentPos:Lerp(targetPos, (Config.FlySpeed * 0.03) / dist), targetHRP.Position)
+    if distance > 15 then
+        -- 🚀 FLYING PHASE: ใช้ BodyVelocity ขับเคลื่อนด้วยฟิสิกส์ (กันหลุด/กันดึงกลับ 100%)
+        FlightVelocity.Velocity = direction.Unit * Config.FlySpeed
+        RootPart.CFrame = CFrame.new(currentPos, targetOverheadPos)
     else
-        RootPart.CFrame = overheadCFrame
+        -- 🎯 OVERHEAD LOCK: ถึงหัวแล้ว หยุดบินและล็อคตำแหน่ง Y+11
+        FlightVelocity.Velocity = Vector3.new(0, 0, 0)
+        RootPart.CFrame = CFrame.new(targetOverheadPos, targetHRP.Position)
     end
 end
 
--- [[ THREAD 1: Continuous M1 Fast Attack (รัวหมัดไม่สะดุด) ]] --
+-- [[ THREAD 1: Continuous M1 Fast Attack ]] --
 task.spawn(function()
     while true do
         task.wait(0.02)
@@ -235,7 +230,7 @@ task.spawn(function()
     end
 end)
 
--- [[ THREAD 2: Parallel Skills with AimLock (ยิงสกิลอัดกลางตัวเป้าหมาย) ]] --
+-- [[ THREAD 2: Parallel Skills AimLock ]] --
 task.spawn(function()
     while true do
         task.wait(0.08)
@@ -264,7 +259,7 @@ task.spawn(function()
         task.wait(0.02)
         
         if Config.Enabled then
-            -- Check Target Validity
+            -- Validate Target
             if not CurrentTarget or not CurrentTarget.Character or not CurrentTarget.Character:FindFirstChild("Humanoid") or CurrentTarget.Character.Humanoid.Health <= 0 or IsInSafeZone(CurrentTarget.Character.HumanoidRootPart.Position) then
                 CurrentTarget = GetBestTarget()
             end
@@ -272,12 +267,12 @@ task.spawn(function()
             if CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
                 local tHRP = CurrentTarget.Character.HumanoidRootPart
                 
-                -- Lock overhead & Haki
-                HoverOverhead(tHRP)
+                -- Smooth Velocity Flight to Target
+                HandleMovement(tHRP)
                 CheckHaki()
             end
         else
-            RemovePhysicsAnchor()
+            StopFlightEngine()
         end
     end
 end)
@@ -308,7 +303,7 @@ local function BuildUI()
 
     local Header = Instance.new("TextLabel", Main)
     Header.Size = UDim2.new(1, 0, 0, 36)
-    Header.Text = "BLOXRUITS OVERHEAD BOUNTY v68"
+    Header.Text = "BLOXRUITS VELOCITY BOUNTY v68"
     Header.TextColor3 = Color3.fromRGB(245, 245, 255)
     Header.Font = Enum.Font.GothamBold
     Header.TextSize = 12
@@ -322,16 +317,16 @@ local function BuildUI()
     Toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
     Toggle.Font = Enum.Font.GothamBold
     Toggle.TextSize = 13
-    Toggle.Text = "AUTO OVERHEAD BOUNTY: OFF"
+    Toggle.Text = "AUTO BOUNTY: OFF"
     local tCorner = Instance.new("UICorner", Toggle)
     tCorner.CornerRadius = UDim.new(0, 6)
 
     Toggle.MouseButton1Click:Connect(function()
         Config.Enabled = not Config.Enabled
         Toggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(40, 150, 90) or Color3.fromRGB(35, 35, 48)
-        Toggle.Text = "AUTO OVERHEAD BOUNTY: " .. (Config.Enabled and "ENABLED (FARMING)" or "OFF")
+        Toggle.Text = "AUTO BOUNTY: " .. (Config.Enabled and "RUNNING (VELOCITY)" or "OFF")
         if not Config.Enabled then
-            RemovePhysicsAnchor()
+            StopFlightEngine()
             CurrentTarget = nil
         end
     end)
@@ -353,14 +348,14 @@ local function BuildUI()
         while ScreenGui.Parent do
             task.wait(0.25)
             if not Config.Enabled then
-                Status.Text = "Mode: IDLE\nOverhead Position: Locked to Y+11\nFast Attack + AimLock: Ready"
+                Status.Text = "Mode: IDLE\nEngine: Physics BodyVelocity\nAnti-Rubberband: Enabled"
             elseif CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") then
                 local hp = math.floor(CurrentTarget.Character.Humanoid.Health)
                 local maxHp = math.floor(CurrentTarget.Character.Humanoid.MaxHealth)
-                Status.Text = string.format("🎯 Locked Target: %s\nHP: %d / %d\nAltitude: Overhead (+11 studs)\nAimLock: ACTIVE\nFast Attack M1: Rapid (0.02s)\nSkill Spam: Parallel Execution",
+                Status.Text = string.format("🎯 Locked Target: %s\nHP: %d / %d\nFlight: BodyVelocity (350 studs/s)\nOverhead: Locked Y+11\nAimLock: ACTIVE",
                     CurrentTarget.Name, hp, maxHp)
             else
-                Status.Text = "Mode: FARMING\nSearching nearest valid PvP target (Outside SafeZones)..."
+                Status.Text = "Mode: HUNTING\nSearching nearest valid PvP target (Outside SafeZones)..."
             end
         end
     end)
