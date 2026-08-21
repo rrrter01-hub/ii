@@ -1,5 +1,6 @@
--- [[ Blox Fruits Overhead Bounty Hunter v80 FLIGHT FIX ]] --
--- แก้ไขเฉพาะจุด: ลดความเร็วบิน + แก้ P ให้นุ่ม + ตัด PlatformStand conflict
+-- [[ Blox Fruits Overhead Bounty Hunter v80 FINAL ]] --
+-- Fix: 160 studs/s Anti-Rollback Flight, PlatformStand Conflict Removed, BodyVelocity P=1250
+-- New: Auto Bounty Hunt Loop (ล่าหัวอัตโนมัติ วนรอบไม่หยุด), Full Telemetry HUD
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -15,13 +16,14 @@ local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 local RootPart = Character:WaitForChild("HumanoidRootPart")
 local Humanoid = Character:WaitForChild("Humanoid")
 
+-- [[ Master Configuration ]] --
 local Config = {
     Enabled = false,
-    TargetMode = "Auto",
+    TargetMode = "Auto",     -- "Auto" (ล่าอัตโนมัติ) / "Manual" (เลือกเอง 100%)
     SelectedPlayer = nil,
-    MinBountyLevel = 20,
-    OverheadDistance = 11,
-    FlySpeed = 90,           -- [FIX] เดิม 320 -> 90 studs/s เซิร์ฟเวอร์ไม่ดีดกลับ
+    MinBountyLevel = 20,     -- เวลขั้นต่ำที่จะได้ค่าหัว
+    OverheadDistance = 11,   -- ระยะลอยเหนือหัว (studs)
+    FlySpeed = 160,          -- 160 studs/s (จุดพอดี เร็วพอใช้ ไม่โดน rollback)
     FastAttack = true,
     AutoHaki = true,
     AutoPvP = true,
@@ -29,8 +31,10 @@ local Config = {
     Skills = {"Z", "X", "C", "V"},
     Weapons = {"Melee", "Sword", "Blox Fruit", "Gun"},
     WeaponSwitchDelay = 0.5,
-    DamageTestTime = 0.8,
-    BlacklistTime = 90
+    DamageTestTime = 0.8,    -- ถ้า 0.8 วิ เลือดไม่ลด = แบนแล้วเปลี่ยนตัว
+    BlacklistTime = 90,      -- แบนเป้าหมายที่ตีไม่เข้า 90 วินาที
+    AutoHunt = true,         -- เปิดล่าหัวอัตโนมัติ วนรอบไม่หยุด
+    HuntInterval = 0.1       -- ช่วงเวลารีเฟรชหาเป้าหมายใหม่ (วินาที)
 }
 
 local CurrentTarget = nil
@@ -41,6 +45,7 @@ local ActiveController = nil
 local LastWeaponSwitch = 0
 local CurrentWeaponIndex = 1
 
+-- Tracking & Blacklist
 local BlacklistedTargets = {}
 local CombatTracker = {
     Player = nil,
@@ -49,12 +54,14 @@ local CombatTracker = {
     HasDealtDamage = false
 }
 
+-- [[ Remotes ]] --
 local Remotes = ReplicatedStorage:WaitForChild("Remotes", 5)
 local CommF = Remotes and Remotes:WaitForChild("CommF_", 5)
 local NetModule = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Net")
 local RegisterAttack = NetModule and (NetModule:FindFirstChild("RegisterAttack") or NetModule:FindFirstChild("RE/RegisterAttack"))
 local RegisterHit = NetModule and (NetModule:FindFirstChild("RegisterHit") or NetModule:FindFirstChild("RE/RegisterHit"))
 
+-- [[ Helper: Telemetry ]] --
 local function GetPlayerLevel(player)
     if not player then return 0 end
     local data = player:FindFirstChild("Data")
@@ -90,17 +97,17 @@ local function IsPvPActive(player)
     return true
 end
 
--- [[ FIX: Soft Physics Setup (Low P = no snap, no conflict) ]] --
+-- [[ Anti-Rollback Flight Physics (P=1250, MaxForce=4e4) ]] --
 local function SetupFlightPhysics()
     if not RootPart then return end
-    
+
     if not FlightBodyVelocity or FlightBodyVelocity.Parent ~= RootPart then
         if FlightBodyVelocity then FlightBodyVelocity:Destroy() end
         FlightBodyVelocity = Instance.new("BodyVelocity")
         FlightBodyVelocity.Name = "OnyxVelocityGlide"
         FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
-        FlightBodyVelocity.MaxForce = Vector3.new(4e4, 4e4, 4e4) -- [FIX] ลด MaxForce ให้นุ่มขึ้น ไม่ต้านระบบเซิร์ฟเวอร์
-        FlightBodyVelocity.P = 1250                              -- [FIX] เดิม 15000 -> 1250
+        FlightBodyVelocity.MaxForce = Vector3.new(4e4, 4e4, 4e4)
+        FlightBodyVelocity.P = 1250
         FlightBodyVelocity.Parent = RootPart
     end
 
@@ -108,9 +115,9 @@ local function SetupFlightPhysics()
         if FlightBodyGyro then FlightBodyGyro:Destroy() end
         FlightBodyGyro = Instance.new("BodyGyro")
         FlightBodyGyro.Name = "OnyxGyro"
-        FlightBodyGyro.MaxTorque = Vector3.new(4e4, 4e4, 4e4)   -- [FIX] ลด MaxTorque
-        FlightBodyGyro.P = 1250                                  -- [FIX] เดิม 15000 -> 1250
-        FlightBodyGyro.D = 100                                   -- [FIX] เดิม 500 -> 100
+        FlightBodyGyro.MaxTorque = Vector3.new(4e4, 4e4, 4e4)
+        FlightBodyGyro.P = 1250
+        FlightBodyGyro.D = 100
         FlightBodyGyro.CFrame = RootPart.CFrame
         FlightBodyGyro.Parent = RootPart
     end
@@ -122,7 +129,7 @@ local function ClearFlightPhysics()
     if Humanoid then Humanoid.PlatformStand = false end
 end
 
--- [[ FIX: ตัด PlatformStand ออก ไม่ขัดกับ BodyVelocity ]] --
+-- [[ Noclip (ไม่มี PlatformStand เพราะขัดกับ BodyVelocity) ]] --
 RunService.Stepped:Connect(function()
     if Config.Enabled and Character and RootPart then
         for _, part in ipairs(Character:GetDescendants()) do
@@ -130,10 +137,10 @@ RunService.Stepped:Connect(function()
                 part.CanCollide = false
             end
         end
-        -- [FIX] ลบ Humanoid.PlatformStand = true ออก เพราะมันสร้าง physics conflict
     end
 end)
 
+-- [[ Character Lifecycle ]] --
 LocalPlayer.CharacterAdded:Connect(function(char)
     Character = char
     RootPart = char:WaitForChild("HumanoidRootPart")
@@ -154,6 +161,7 @@ function SetupCombatHooks()
 end
 SetupCombatHooks()
 
+-- [[ Auto Enable PvP & Buso Haki ]] --
 local function EnsurePvPAndHaki()
     if not Character then return end
     pcall(function()
@@ -166,28 +174,43 @@ local function EnsurePvPAndHaki()
     end)
 end
 
+-- [[ Target Selector: Proximity & Bounty First ]] --
 local function AcquireBestTarget()
     local best = nil
     local shortestDist = math.huge
     local myLevel = GetPlayerLevel(LocalPlayer)
 
     for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") then
+        if p ~= LocalPlayer
+            and p.Character
+            and p.Character:FindFirstChild("HumanoidRootPart")
+            and p.Character:FindFirstChild("Humanoid") then
+
             local hum = p.Character.Humanoid
             local hrp = p.Character.HumanoidRootPart
             local pLevel = GetPlayerLevel(p)
 
+            -- ตรวจสอบ Blacklist
             local isBlacklisted = false
             if BlacklistedTargets[p] then
-                if tick() < BlacklistedTargets[p] then isBlacklisted = true
-                else BlacklistedTargets[p] = nil end
+                if tick() < BlacklistedTargets[p] then
+                    isBlacklisted = true
+                else
+                    BlacklistedTargets[p] = nil
+                end
             end
 
-            if not isBlacklisted and hum.Health > 0 and IsPvPActive(p) and pLevel >= Config.MinBountyLevel then
+            if not isBlacklisted
+                and hum.Health > 0
+                and IsPvPActive(p)
+                and pLevel >= Config.MinBountyLevel then
+
+                -- กรองพวกเวลต่ำที่ไม่ได้ค่าหัว
                 local isBountyEligible = true
                 if myLevel > 100 and pLevel < (myLevel - 350) and pLevel < 2000 then
                     isBountyEligible = false
                 end
+
                 if isBountyEligible then
                     local dist = (RootPart.Position - hrp.Position).Magnitude
                     if dist < shortestDist then
@@ -198,9 +221,11 @@ local function AcquireBestTarget()
             end
         end
     end
+
     return best
 end
 
+-- [[ Weapon Switcher ]] --
 local function SwitchWeapon()
     local backpack = LocalPlayer:FindFirstChild("Backpack")
     if not backpack or not Character or not Humanoid then return end
@@ -208,7 +233,9 @@ local function SwitchWeapon()
     for _, tool in ipairs(backpack:GetChildren()) do
         if tool:IsA("Tool") then
             local tType = tool:GetAttribute("WeaponType") or tool.ToolTip
-            if tType == category or tool.Name:lower():find(category:lower()) or (category == "Melee" and tool:FindFirstChild("CombatScript")) then
+            if tType == category
+                or tool.Name:lower():find(category:lower())
+                or (category == "Melee" and tool:FindFirstChild("CombatScript")) then
                 Humanoid:EquipTool(tool)
                 break
             end
@@ -217,6 +244,7 @@ local function SwitchWeapon()
     CurrentWeaponIndex = (CurrentWeaponIndex % #Config.Weapons) + 1
 end
 
+-- [[ Fast Attack Engine ]] --
 local function ExecuteFastAttack(targetHRP)
     if not Config.FastAttack or not targetHRP then return end
     pcall(function()
@@ -242,9 +270,12 @@ local function ExecuteFastAttack(targetHRP)
     VirtualUser:Button1Up(Vector2.new(0, 0))
 end
 
+-- [[ Skill Cast Engine ]] --
 local function CastSkills(targetHRP, targetHum)
     if not Config.SkillSpam or not targetHRP or targetHum.Health <= 0 then return end
-    pcall(function() Camera.CFrame = CFrame.new(Camera.CFrame.Position, targetHRP.Position) end)
+    pcall(function()
+        Camera.CFrame = CFrame.new(Camera.CFrame.Position, targetHRP.Position)
+    end)
     for _, key in ipairs(Config.Skills) do
         if not CurrentTarget or targetHum.Health <= 0 then break end
         VirtualInputManager:SendKeyEvent(true, Enum.KeyCode[key], false, game)
@@ -254,61 +285,94 @@ local function CastSkills(targetHRP, targetHum)
     end
 end
 
--- [[ FIX: Soft Velocity Glide (90 studs/s, เซิร์ฟเวอร์ไม่ดีดกลับ) ]] --
+-- [[ 160 studs/s Anti-Rollback Velocity Glide ]] --
 local function GlideToTarget(targetHRP)
     SetupFlightPhysics()
     if not FlightBodyVelocity or not FlightBodyGyro then return end
 
     local targetOverheadPos = targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0)
     local curPos = RootPart.Position
-    local delta = (targetOverheadPos - curPos)
+    local delta = targetOverheadPos - curPos
     local dist = delta.Magnitude
 
     FlightBodyGyro.CFrame = CFrame.new(curPos, targetHRP.Position) * CFrame.Angles(math.rad(-90), 0, 0)
 
     if dist > 10 then
-        FlightBodyVelocity.Velocity = delta.Unit * Config.FlySpeed  -- 90 studs/s นุ่มๆ ไม่โดนเซิร์ฟดึงกลับ
+        -- บินพุ่งตรงด้วยความเร็ว 160 studs/s ไม่โดนเซิร์ฟดึงกลับ
+        FlightBodyVelocity.Velocity = delta.Unit * Config.FlySpeed
     else
-        -- ถึงหัวแล้ว หยุดนิ่ง
+        -- ถึงจุดเหนือหัวแล้ว ล็อคนิ่งทันที
         FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
         RootPart.CFrame = CFrame.new(targetOverheadPos, targetHRP.Position) * CFrame.Angles(math.rad(-90), 0, 0)
     end
 end
 
+-- [[ Auto Bounty Hunt Loop (วนรอบหาเป้าหมายใหม่ทันทีเมื่อตายสนิท) ]] --
+task.spawn(function()
+    while true do
+        task.wait(Config.HuntInterval)
+        if Config.Enabled and Config.AutoHunt and Config.TargetMode == "Auto" then
+            local needNew = false
+            if not CurrentTarget then
+                needNew = true
+            elseif not CurrentTarget.Parent
+                or not CurrentTarget.Character
+                or not CurrentTarget.Character:FindFirstChild("HumanoidRootPart")
+                or not CurrentTarget.Character:FindFirstChild("Humanoid")
+                or CurrentTarget.Character.Humanoid.Health <= 0 then
+                needNew = true
+            end
+
+            if needNew then
+                CurrentTarget = AcquireBestTarget()
+                CombatTracker.Player = CurrentTarget
+                CombatTracker.EngagedTime = 0
+                CombatTracker.InitialHP = 0
+                CombatTracker.HasDealtDamage = false
+            end
+        end
+    end
+end)
+
+-- [[ Master Combat Loop ]] --
 task.spawn(function()
     while true do
         task.wait(0.015)
-        
+
         if Config.Enabled then
             EnsurePvPAndHaki()
 
+            -- โหมดเลือกเอง: ล็อค 100% ห้ามเปลี่ยน
             if Config.TargetMode == "Manual" and Config.SelectedPlayer then
                 local p = Config.SelectedPlayer
-                if p and p.Parent and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") and p.Character.Humanoid.Health > 0 then
+                if p and p.Parent
+                    and p.Character
+                    and p.Character:FindFirstChild("HumanoidRootPart")
+                    and p.Character:FindFirstChild("Humanoid")
+                    and p.Character.Humanoid.Health > 0 then
                     CurrentTarget = p
                 else
                     CurrentTarget = nil
                 end
-            else
-                if not CurrentTarget or not CurrentTarget.Parent or not CurrentTarget.Character or not CurrentTarget.Character:FindFirstChild("HumanoidRootPart") or not CurrentTarget.Character:FindFirstChild("Humanoid") or CurrentTarget.Character.Humanoid.Health <= 0 then
-                    CurrentTarget = AcquireBestTarget()
-                    CombatTracker.Player = CurrentTarget
-                    CombatTracker.EngagedTime = 0
-                    CombatTracker.InitialHP = 0
-                    CombatTracker.HasDealtDamage = false
-                end
             end
 
-            if CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
+            -- บินพุ่งหาเป้าหมายแล้วโจมตี
+            if CurrentTarget
+                and CurrentTarget.Character
+                and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
+
                 local tHRP = CurrentTarget.Character.HumanoidRootPart
                 local tHum = CurrentTarget.Character.Humanoid
 
                 if tHum.Health > 0 then
+                    -- บิน Velocity Glide 160 studs/s
                     GlideToTarget(tHRP)
 
                     local dist = (RootPart.Position - tHRP.Position).Magnitude
 
+                    -- เมื่อเข้าระยะโจมตี
                     if dist <= 25 then
+                        -- เริ่ม Damage Probe
                         if CombatTracker.Player ~= CurrentTarget or CombatTracker.EngagedTime == 0 then
                             CombatTracker.Player = CurrentTarget
                             CombatTracker.EngagedTime = tick()
@@ -316,11 +380,13 @@ task.spawn(function()
                             CombatTracker.HasDealtDamage = false
                         else
                             if tHum.Health < CombatTracker.InitialHP then
+                                -- ดาเมจเข้า ล่าต่อจนตาย
                                 CombatTracker.HasDealtDamage = true
                                 CombatTracker.InitialHP = tHum.Health
                                 CombatTracker.EngagedTime = tick()
                             elseif not CombatTracker.HasDealtDamage then
                                 if (tick() - CombatTracker.EngagedTime) >= Config.DamageTestTime then
+                                    -- ตีไม่เข้า (เซฟโซน/ปิด PvP) -> แบนแล้วเปลี่ยนตัวทันที
                                     BlacklistedTargets[CurrentTarget] = tick() + Config.BlacklistTime
                                     CurrentTarget = nil
                                     CombatTracker.EngagedTime = 0
@@ -338,6 +404,7 @@ task.spawn(function()
                         end
                     end
                 else
+                    -- เป้าหมายตายสนิท -> Auto Hunt Loop จะดึงคนถัดไปเอง
                     CurrentTarget = nil
                 end
             end
@@ -348,6 +415,7 @@ task.spawn(function()
     end
 end)
 
+-- [[ UI & Telemetry ]] --
 local function BuildUI()
     local ScreenGui = Instance.new("ScreenGui")
     ScreenGui.Name = "OnyxOverheadHub"
@@ -356,7 +424,7 @@ local function BuildUI()
     ScreenGui.Parent = success and coreGui or LocalPlayer:WaitForChild("PlayerGui")
 
     local Main = Instance.new("Frame", ScreenGui)
-    Main.Size = UDim2.new(0, 360, 0, 460)
+    Main.Size = UDim2.new(0, 360, 0, 480)
     Main.Position = UDim2.new(0.5, -180, 0.18, 0)
     Main.BackgroundColor3 = Color3.fromRGB(12, 12, 16)
     Main.BorderSizePixel = 0
@@ -367,14 +435,16 @@ local function BuildUI()
     Stroke.Color = Color3.fromRGB(90, 95, 145)
     Stroke.Thickness = 1.5
 
+    -- Header
     local Header = Instance.new("TextLabel", Main)
     Header.Size = UDim2.new(1, 0, 0, 36)
-    Header.Text = "BLOXRUITS BOUNTY v80 [FLIGHT FIXED]"
+    Header.Text = "BLOXRUITS BOUNTY v80 FINAL (160 studs/s)"
     Header.TextColor3 = Color3.fromRGB(240, 240, 255)
     Header.Font = Enum.Font.GothamBold
-    Header.TextSize = 12
+    Header.TextSize = 11
     Header.BackgroundTransparency = 1
 
+    -- Toggle
     local Toggle = Instance.new("TextButton", Main)
     Toggle.Size = UDim2.new(0.92, 0, 0, 38)
     Toggle.Position = UDim2.new(0.04, 0, 0, 38)
@@ -382,9 +452,10 @@ local function BuildUI()
     Toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
     Toggle.Font = Enum.Font.GothamBold
     Toggle.TextSize = 12
-    Toggle.Text = "AUTO BOUNTY GLIDE: OFF"
+    Toggle.Text = "AUTO BOUNTY HUNT: OFF"
     Instance.new("UICorner", Toggle).CornerRadius = UDim.new(0, 6)
 
+    -- Mode Button
     local ModeBtn = Instance.new("TextButton", Main)
     ModeBtn.Size = UDim2.new(0.92, 0, 0, 30)
     ModeBtn.Position = UDim2.new(0.04, 0, 0, 80)
@@ -395,6 +466,7 @@ local function BuildUI()
     ModeBtn.Text = "TARGET MODE: AUTO (PROXIMITY FIRST)"
     Instance.new("UICorner", ModeBtn).CornerRadius = UDim.new(0, 6)
 
+    -- Nearest Radar
     local NearestRadar = Instance.new("TextLabel", Main)
     NearestRadar.Size = UDim2.new(0.92, 0, 0, 44)
     NearestRadar.Position = UDim2.new(0.04, 0, 0, 114)
@@ -406,6 +478,7 @@ local function BuildUI()
     NearestRadar.Text = "🎯 Radar: Scanning..."
     Instance.new("UICorner", NearestRadar).CornerRadius = UDim.new(0, 6)
 
+    -- Player Scroll List
     local PlayerListFrame = Instance.new("ScrollingFrame", Main)
     PlayerListFrame.Size = UDim2.new(0.92, 0, 0, 130)
     PlayerListFrame.Position = UDim2.new(0.04, 0, 0, 164)
@@ -418,8 +491,9 @@ local function BuildUI()
     UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
     UIListLayout.Padding = UDim.new(0, 4)
 
+    -- Status Box
     local Status = Instance.new("TextLabel", Main)
-    Status.Size = UDim2.new(0.92, 0, 0, 80)
+    Status.Size = UDim2.new(0.92, 0, 0, 90)
     Status.Position = UDim2.new(0.04, 0, 0, 300)
     Status.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
     Status.TextColor3 = Color3.fromRGB(200, 220, 255)
@@ -428,6 +502,17 @@ local function BuildUI()
     Status.TextWrapped = true
     Status.Text = "Status: Standing By"
     Instance.new("UICorner", Status).CornerRadius = UDim.new(0, 6)
+
+    -- Refresh Button
+    local RefreshBtn = Instance.new("TextButton", Main)
+    RefreshBtn.Size = UDim2.new(0.92, 0, 0, 26)
+    RefreshBtn.Position = UDim2.new(0.04, 0, 0, 398)
+    RefreshBtn.BackgroundColor3 = Color3.fromRGB(28, 32, 44)
+    RefreshBtn.TextColor3 = Color3.fromRGB(180, 200, 255)
+    RefreshBtn.Font = Enum.Font.GothamBold
+    RefreshBtn.TextSize = 11
+    RefreshBtn.Text = "🔄 REFRESH PLAYER TELEMETRY"
+    Instance.new("UICorner", RefreshBtn).CornerRadius = UDim.new(0, 6)
 
     local PlayerButtons = {}
 
@@ -443,7 +528,7 @@ local function BuildUI()
                 local lvl = GetPlayerLevel(p)
                 local hp, maxHp = GetPlayerHealth(p)
                 local dist = GetDistanceToPlayer(p)
-                local pvpStatus = IsPvPActive(p) and "[PvP: ON]" or "[PvP: OFF]"
+                local pvpStatus = IsPvPActive(p) and "[PvP✅]" or "[PvP❌]"
 
                 local pBtn = Instance.new("TextButton", PlayerListFrame)
                 pBtn.Size = UDim2.new(0.96, 0, 0, 30)
@@ -452,7 +537,7 @@ local function BuildUI()
                 pBtn.Font = Enum.Font.Gotham
                 pBtn.TextSize = 10
                 pBtn.TextXAlignment = Enum.TextXAlignment.Left
-                pBtn.Text = string.format("  [%s] Lv.%d %s | HP: %d/%d | %d studs", p.Name, lvl, pvpStatus, hp, maxHp, dist)
+                pBtn.Text = string.format("  [%s] Lv.%d %s | HP:%d/%d | %dstuds", p.Name, lvl, pvpStatus, hp, maxHp, dist)
                 Instance.new("UICorner", pBtn).CornerRadius = UDim.new(0, 4)
                 PlayerButtons[p] = pBtn
 
@@ -461,6 +546,8 @@ local function BuildUI()
                     Config.TargetMode = "Manual"
                     ModeBtn.Text = "TARGET MODE: MANUAL (" .. p.Name .. ")"
                     CurrentTarget = p
+                    CombatTracker.EngagedTime = 0
+                    CombatTracker.HasDealtDamage = false
                     PopulatePlayerList()
                 end)
             end
@@ -471,22 +558,12 @@ local function BuildUI()
     PopulatePlayerList()
     Players.PlayerAdded:Connect(PopulatePlayerList)
     Players.PlayerRemoving:Connect(PopulatePlayerList)
-
-    local RefreshBtn = Instance.new("TextButton", Main)
-    RefreshBtn.Size = UDim2.new(0.92, 0, 0, 26)
-    RefreshBtn.Position = UDim2.new(0.04, 0, 0, 388)
-    RefreshBtn.BackgroundColor3 = Color3.fromRGB(28, 32, 44)
-    RefreshBtn.TextColor3 = Color3.fromRGB(180, 200, 255)
-    RefreshBtn.Font = Enum.Font.GothamBold
-    RefreshBtn.TextSize = 11
-    RefreshBtn.Text = "🔄 REFRESH TELEMETRY & LIST"
-    Instance.new("UICorner", RefreshBtn).CornerRadius = UDim.new(0, 6)
     RefreshBtn.MouseButton1Click:Connect(PopulatePlayerList)
 
     Toggle.MouseButton1Click:Connect(function()
         Config.Enabled = not Config.Enabled
         Toggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(45, 160, 95) or Color3.fromRGB(35, 35, 48)
-        Toggle.Text = "AUTO BOUNTY GLIDE: " .. (Config.Enabled and "ONLINE (90 studs/s)" or "OFF")
+        Toggle.Text = "AUTO BOUNTY HUNT: " .. (Config.Enabled and "ACTIVE (AUTO HUNT ON)" or "OFF")
         if not Config.Enabled then
             ClearFlightPhysics()
             CurrentTarget = nil
@@ -507,20 +584,24 @@ local function BuildUI()
         end
     end)
 
+    -- Real-time Refresh Loop
     task.spawn(function()
         while ScreenGui.Parent do
             task.wait(0.25)
+
+            -- อัปเดต Player Buttons
             for p, btn in pairs(PlayerButtons) do
                 if p and p.Parent then
                     local lvl = GetPlayerLevel(p)
                     local hp, maxHp = GetPlayerHealth(p)
                     local dist = GetDistanceToPlayer(p)
-                    local pvpStatus = IsPvPActive(p) and "[PvP: ON]" or "[PvP: OFF]"
-                    btn.Text = string.format("  [%s] Lv.%d %s | HP: %d/%d | %d studs", p.Name, lvl, pvpStatus, hp, maxHp, dist)
+                    local pvpStatus = IsPvPActive(p) and "[PvP✅]" or "[PvP❌]"
+                    btn.Text = string.format("  [%s] Lv.%d %s | HP:%d/%d | %dstuds", p.Name, lvl, pvpStatus, hp, maxHp, dist)
                     btn.BackgroundColor3 = (Config.SelectedPlayer == p) and Color3.fromRGB(50, 130, 80) or Color3.fromRGB(28, 28, 38)
                 end
             end
 
+            -- Nearest PvP Player Radar
             local nearestP, minD = nil, math.huge
             if RootPart then
                 for _, p in ipairs(Players:GetPlayers()) do
@@ -536,22 +617,23 @@ local function BuildUI()
             if nearestP and nearestP.Character and nearestP.Character:FindFirstChild("Humanoid") then
                 local lvl = GetPlayerLevel(nearestP)
                 local hp, maxHp = GetPlayerHealth(nearestP)
-                NearestRadar.Text = string.format("🎯 NEAREST (PvP ON): %s (Lv.%d)\nHP: %d / %d | Distance: %d studs", nearestP.Name, lvl, hp, maxHp, math.floor(minD))
+                NearestRadar.Text = string.format("🎯 NEAREST(PvP✅): %s Lv.%d\nHP: %d/%d | %d studs", nearestP.Name, lvl, hp, maxHp, math.floor(minD))
             else
-                NearestRadar.Text = "🎯 NEAREST (PvP ON): No PvP-enabled players nearby"
+                NearestRadar.Text = "🎯 NEAREST: No PvP-enabled players nearby"
             end
 
+            -- Status Box
             if not Config.Enabled then
-                Status.Text = "Mode: IDLE | Soft Glide: 90 studs/s\n[FIX] BodyVelocity P=1250 (Anti-Rollback)\n[FIX] PlatformStand Conflict Removed"
+                Status.Text = "Mode: IDLE\nSpeed: 160 studs/s (Anti-Rollback)\nAuto Hunt: " .. (Config.AutoHunt and "ON (ล่าหัวอัตโนมัติ)" or "OFF")
             elseif CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") then
                 local lvl = GetPlayerLevel(CurrentTarget)
                 local hp, maxHp = GetPlayerHealth(CurrentTarget)
                 local dist = GetDistanceToPlayer(CurrentTarget)
-                local killState = CombatTracker.HasDealtDamage and "EXECUTION (RELENTLESS)" or "GLIDING TO TARGET"
-                Status.Text = string.format("LOCKED: %s (Lv.%d) | Dist: %d studs\nHP: %d / %d | State: %s",
-                    CurrentTarget.Name, lvl, dist, hp, maxHp, killState)
+                local state = CombatTracker.HasDealtDamage and "🔴 EXECUTION (RELENTLESS)" or "🟡 APPROACHING / PROBING"
+                Status.Text = string.format("LOCKED: %s (Lv.%d)\nDist: %d studs | HP: %d/%d\nState: %s\nMode: %s | Weapon: %s",
+                    CurrentTarget.Name, lvl, dist, hp, maxHp, state, Config.TargetMode, Config.Weapons[CurrentWeaponIndex] or "Melee")
             else
-                Status.Text = "ACQUIRING TARGET\nSearching eligible bounty target..."
+                Status.Text = "🔍 AUTO HUNTING...\nSearching bounty eligible targets\n(PvP✅, Lv." .. Config.MinBountyLevel .. "+, No SafeZone)"
             end
         end
     end)
