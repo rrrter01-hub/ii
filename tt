@@ -1,5 +1,5 @@
--- [[ Blox Fruits Stable Overhead Bounty Hunter v68 ]] --
--- Architecture: Overhead Hover (Y+12), BodyVelocity Anchor, Combat Framework Fast Attack, Real Hit Reg
+-- [[ Blox Fruits Stable Overhead Bounty Hunter v68 (Fixed Combat & Aimlock) ]] --
+-- Architecture: Overhead Hover (Y+11), BodyVelocity Anchor, Perfected Aimlock & Parallel Combat
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -10,6 +10,7 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
 local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 local RootPart = Character:WaitForChild("HumanoidRootPart")
 local Humanoid = Character:WaitForChild("Humanoid")
@@ -146,15 +147,40 @@ local function GetBestTarget()
     return best
 end
 
--- [[ Real Fast Attack Registration ]] --
+-- [[ Auto Equip Best Weapon ]] --
+local function EquipPreferredWeapon()
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if not backpack or not Character then return end
+
+    if not Character:FindFirstChildOfClass("Tool") then
+        for _, category in ipairs(Config.Weapons) do
+            for _, tool in ipairs(backpack:GetChildren()) do
+                if tool:IsA("Tool") then
+                    local tType = tool:GetAttribute("WeaponType") or tool.ToolTip
+                    if tType == category or tool.Name:lower():find(category:lower()) or (category == "Melee" and tool:FindFirstChild("CombatScript")) then
+                        Humanoid:EquipTool(tool)
+                        return
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- [[ AimLock Directly onto Target (Camera + Character) ]] --
+local function AimAtTarget(targetPosition)
+    Camera.CFrame = CFrame.new(Camera.CFrame.Position, targetPosition)
+end
+
+-- [[ Real Fast Attack Registration (Extended Hitbox) ]] --
 local function ExecuteFastAttack()
     if not Config.FastAttack then return end
 
-    -- 1. In-game Controller Attack Trigger
+    -- 1. In-game Controller Attack Trigger with Boosted Hitbox
     if ActiveController and ActiveController.attack then
         pcall(function()
             ActiveController.timeToNextAttack = 0
-            ActiveController.hitboxMagnitude = 60
+            ActiveController.hitboxMagnitude = 75
             ActiveController:attack()
         end)
     end
@@ -176,47 +202,63 @@ local function ExecuteFastAttack()
     end
 end
 
--- [[ Auto Equip Best Weapon ]] --
-local function EquipPreferredWeapon()
-    local backpack = LocalPlayer:FindFirstChild("Backpack")
-    if not backpack or not Character then return end
-
-    -- Prioritize currently holding or pick first available category
-    if not Character:FindFirstChildOfClass("Tool") then
-        for _, category in ipairs(Config.Weapons) do
-            for _, tool in ipairs(backpack:GetChildren()) do
-                if tool:IsA("Tool") then
-                    local tType = tool:GetAttribute("WeaponType") or tool.ToolTip
-                    if tType == category or tool.Name:lower():find(category:lower()) or (category == "Melee" and tool:FindFirstChild("CombatScript")) then
-                        Humanoid:EquipTool(tool)
-                        return
-                    end
-                end
-            end
-        end
-    end
-end
-
 -- [[ Smooth Overhead Flight Movement ]] --
 local function HoverOverhead(targetHRP)
     EnsurePhysicsAnchor()
     
-    -- Target overhead position: 11 studs directly above the target, aiming downward
-    local overheadCFrame = CFrame.new(targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0)) * CFrame.Angles(math.rad(-90), 0, 0)
+    -- Target overhead position: 11 studs directly above the target, aiming downward directly at target
+    local overheadCFrame = CFrame.new(targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0), targetHRP.Position)
     local currentPos = RootPart.Position
     local targetPos = overheadCFrame.Position
     local dist = (currentPos - targetPos).Magnitude
 
     if dist > 150 then
-        -- Fast Linear Movement for distance
-        RootPart.CFrame = CFrame.new(currentPos:Lerp(targetPos, (Config.FlySpeed * 0.03) / dist))
+        RootPart.CFrame = CFrame.new(currentPos:Lerp(targetPos, (Config.FlySpeed * 0.03) / dist), targetHRP.Position)
     else
-        -- Lock onto overhead spot
         RootPart.CFrame = overheadCFrame
     end
 end
 
--- [[ Combat Loop: Overhead Lock + Fast Attack + Skills ]] --
+-- [[ THREAD 1: Continuous M1 Fast Attack (รัวหมัดไม่สะดุด) ]] --
+task.spawn(function()
+    while true do
+        task.wait(0.02)
+        if Config.Enabled and CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
+            local tHRP = CurrentTarget.Character.HumanoidRootPart
+            local dist = (RootPart.Position - tHRP.Position).Magnitude
+            if dist <= (Config.OverheadDistance + 14) then
+                EquipPreferredWeapon()
+                AimAtTarget(tHRP.Position)
+                ExecuteFastAttack()
+            end
+        end
+    end
+end)
+
+-- [[ THREAD 2: Parallel Skills with AimLock (ยิงสกิลอัดกลางตัวเป้าหมาย) ]] --
+task.spawn(function()
+    while true do
+        task.wait(0.08)
+        if Config.Enabled and Config.SkillSpam and CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
+            local tHRP = CurrentTarget.Character.HumanoidRootPart
+            local tHum = CurrentTarget.Character:FindFirstChild("Humanoid")
+            local dist = (RootPart.Position - tHRP.Position).Magnitude
+
+            if dist <= (Config.OverheadDistance + 14) and tHum and tHum.Health > 0 then
+                for _, key in ipairs(Config.Skills) do
+                    if not Config.Enabled or not CurrentTarget or tHum.Health <= 0 then break end
+                    AimAtTarget(tHRP.Position)
+                    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode[key], false, game)
+                    task.wait(0.04)
+                    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode[key], false, game)
+                    task.wait(0.12)
+                end
+            end
+        end
+    end
+end)
+
+-- [[ Master Navigation & Tracking Loop ]] --
 task.spawn(function()
     while true do
         task.wait(0.02)
@@ -229,30 +271,10 @@ task.spawn(function()
 
             if CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
                 local tHRP = CurrentTarget.Character.HumanoidRootPart
-                local tHum = CurrentTarget.Character.Humanoid
-
-                -- Lock overhead
+                
+                -- Lock overhead & Haki
                 HoverOverhead(tHRP)
                 CheckHaki()
-                EquipPreferredWeapon()
-
-                -- Within Attack Range
-                local dist = (RootPart.Position - tHRP.Position).Magnitude
-                if dist <= (Config.OverheadDistance + 12) then
-                    -- Trigger Fast Attack Spam
-                    ExecuteFastAttack()
-
-                    -- Cast Skills (Rapid cycle)
-                    if Config.SkillSpam then
-                        for _, key in ipairs(Config.Skills) do
-                            if not CurrentTarget or tHum.Health <= 0 then break end
-                            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode[key], false, game)
-                            task.wait(0.04)
-                            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode[key], false, game)
-                            task.wait(0.12)
-                        end
-                    end
-                end
             end
         else
             RemovePhysicsAnchor()
@@ -331,11 +353,11 @@ local function BuildUI()
         while ScreenGui.Parent do
             task.wait(0.25)
             if not Config.Enabled then
-                Status.Text = "Mode: IDLE\nOverhead Position: Locked to Y+11\nFast Attack: Ready"
+                Status.Text = "Mode: IDLE\nOverhead Position: Locked to Y+11\nFast Attack + AimLock: Ready"
             elseif CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") then
                 local hp = math.floor(CurrentTarget.Character.Humanoid.Health)
                 local maxHp = math.floor(CurrentTarget.Character.Humanoid.MaxHealth)
-                Status.Text = string.format("Target Locked: %s\nHP: %d / %d\nAltitude: Overhead (+11 studs)\nFast Attack M1: Active\nSkill Spam: Active",
+                Status.Text = string.format("🎯 Locked Target: %s\nHP: %d / %d\nAltitude: Overhead (+11 studs)\nAimLock: ACTIVE\nFast Attack M1: Rapid (0.02s)\nSkill Spam: Parallel Execution",
                     CurrentTarget.Name, hp, maxHp)
             else
                 Status.Text = "Mode: FARMING\nSearching nearest valid PvP target (Outside SafeZones)..."
