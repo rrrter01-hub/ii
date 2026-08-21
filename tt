@@ -1,5 +1,5 @@
--- [[ Blox Fruits God-Tier Auto Bounty Hunter v68 ]] --
--- Features: Custom Dark UI, PvP-Only Target Filtering, Fast Attack M1, Multi-Weapon Rotation, Auto Haki
+-- [[ Blox Fruits God-Tier Target Filter & Auto Bounty v68 ]] --
+-- Features: Dynamic SafeZone Raycast/BoundingBox Check, Strict PvP Validation, Auto Target Skipping & Blacklist
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -8,7 +8,6 @@ local RunService = game:GetService("RunService")
 local VirtualUser = game:GetService("VirtualUser")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
@@ -16,31 +15,159 @@ local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 local RootPart = Character:WaitForChild("HumanoidRootPart")
 local Humanoid = Character:WaitForChild("Humanoid")
 
--- State & Settings
+-- [[ Configuration & States ]] --
 local Settings = {
     AutoBounty = false,
     FastAttack = true,
     AutoHaki = true,
     TargetPvPOnly = true,
-    SelectedTargetName = "Auto Nearest",
+    StrictSafeZoneCheck = true,
+    SkipStuckTargets = true,
+    TargetTimeout = 3.5, -- วินาทีสูงสุดในการตี ถ้าเลือดไม่ลดจะข้ามทันที
+    BlacklistDuration = 20, -- พักตัวที่ไม่สามารถตีได้ 20 วินาที
     TweenSpeed = 350,
-    AttackDistance = 5, -- ติดตัวเพื่อให้หมัด/สกิลโดน 100%
+    AttackDistance = 4,
     WeaponSequence = {"Melee", "Blox Fruit", "Sword", "Gun"},
-    Skills = {"Z", "X", "C", "V"},
-    SafeZoneCheck = true
+    Skills = {"Z", "X", "C", "V"}
 }
 
 local CurrentTarget = nil
 local CurrentTween = nil
+local BlacklistedPlayers = {} -- [Player] = ExpireTimestamp
+local TargetInitialHealth = nil
+local TargetLockTime = 0
 
--- Character Setup
+-- Character Lifecycle
 LocalPlayer.CharacterAdded:Connect(function(char)
     Character = char
     RootPart = char:WaitForChild("HumanoidRootPart")
     Humanoid = char:WaitForChild("Humanoid")
 end)
 
--- Auto Buso Haki (เกราะ)
+-- [[ Cache SafeZone Locations ]] --
+local SafeZoneParts = {}
+local function CacheSafeZones()
+    table.clear(SafeZoneParts)
+    
+    local worldOrigin = Workspace:FindFirstChild("_WorldOrigin")
+    if worldOrigin and worldOrigin:FindFirstChild("SafeZones") then
+        for _, zone in ipairs(worldOrigin.SafeZones:GetChildren()) do
+            if zone:IsA("BasePart") then
+                table.insert(SafeZoneParts, zone)
+            end
+        end
+    end
+    
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if obj.Name:lower():find("safezone") and obj:IsA("BasePart") then
+            if not table.find(SafeZoneParts, obj) then
+                table.insert(SafeZoneParts, obj)
+            end
+        end
+    end
+end
+CacheSafeZones()
+
+-- [[ Strict SafeZone Detection (Bounding Box & Proximity) ]] --
+local function IsPositionInSafeZone(pos)
+    if not Settings.StrictSafeZoneCheck then return false end
+    
+    for _, zone in ipairs(SafeZoneParts) do
+        if zone and zone.Parent then
+            local relative = zone.CFrame:PointToObjectSpace(pos)
+            local size = zone.Size / 2
+            
+            -- Point In Box Check
+            if math.abs(relative.X) <= size.X and math.abs(relative.Y) <= size.Y and math.abs(relative.Z) <= size.Z then
+                return true
+            end
+            
+            -- Radius fallback for spherical / mesh safezones
+            if (zone.Position - pos).Magnitude <= (zone.Size.Magnitude / 2) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- [[ Comprehensive Target Validator ]] --
+local function IsValidPvPTarget(player)
+    if player == LocalPlayer or not player or not player.Parent then return false end
+    
+    -- Blacklist Check
+    if BlacklistedPlayers[player] and tick() < BlacklistedPlayers[player] then
+        return false
+    end
+    
+    local char = player.Character
+    if not char then return false end
+    
+    local hum = char:FindFirstChild("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not hrp or hum.Health <= 0 then return false end
+    
+    -- 1. ForceField / Spawn Shield
+    if char:FindFirstChildOfClass("ForceField") then return false end
+    
+    -- 2. PvP Flags Check
+    if Settings.TargetPvPOnly then
+        if char:FindFirstChild("PvPDisabled") or char:FindFirstChild("SafeZoneShield") then
+            return false
+        end
+        
+        local data = player:FindFirstChild("Data")
+        if data and data:FindFirstChild("PvP") and data.PvP.Value == false then
+            return false
+        end
+    end
+    
+    -- 3. Strict Map SafeZone Location Check
+    if IsPositionInSafeZone(hrp.Position) then
+        return false
+    end
+    
+    return true
+end
+
+-- [[ Dynamic Target Selector with Priority ]] --
+local function AcquireNextTarget()
+    -- Clean expired blacklist
+    local now = tick()
+    for p, expire in pairs(BlacklistedPlayers) do
+        if now >= expire then
+            BlacklistedPlayers[p] = nil
+        end
+    end
+
+    local bestTarget = nil
+    local lowestDist = math.huge
+
+    for _, p in ipairs(Players:GetPlayers()) do
+        if IsValidPvPTarget(p) then
+            local dist = (RootPart.Position - p.Character.HumanoidRootPart.Position).Magnitude
+            if dist < lowestDist then
+                lowestDist = dist
+                bestTarget = p
+            end
+        end
+    end
+
+    return bestTarget
+end
+
+-- [[ Blacklist Target Helper ]] --
+local function BlacklistCurrentTarget(reason)
+    if CurrentTarget then
+        BlacklistedPlayers[CurrentTarget] = tick() + Settings.BlacklistDuration
+        print(string.format("[Onyx Hunter] Skipped & Blacklisted '%s': %s", CurrentTarget.Name, reason or "Invalid Target"))
+        CurrentTarget = nil
+        TargetInitialHealth = nil
+        if CurrentTween then CurrentTween:Cancel() end
+    end
+end
+
+-- [[ Auto Buso Haki ]] --
 local function EnsureHaki()
     if not Settings.AutoHaki or not Character then return end
     if not Character:FindFirstChild("HasBuso") then
@@ -52,25 +179,7 @@ local function EnsureHaki()
     end
 end
 
--- Check PvP & Safezone Status
-local function IsPvPActive(targetPlayer)
-    if not targetPlayer or not targetPlayer.Character then return false end
-    local targetChar = targetPlayer.Character
-    
-    -- Safezone / ForceField Check
-    if targetChar:FindFirstChildOfClass("ForceField") then return false end
-    
-    -- Blox Fruits PvP Flag check
-    local leaderstats = targetPlayer:FindFirstChild("leaderstats")
-    local data = targetPlayer:FindFirstChild("Data")
-    if data and data:FindFirstChild("PvP") and data.PvP.Value == false then
-        return false
-    end
-    
-    return true
-end
-
--- Equip Weapon Category
+-- [[ Weapon Equipper ]] --
 local function EquipWeapon(category)
     local backpack = LocalPlayer:FindFirstChild("Backpack")
     if not backpack or not Character then return end
@@ -78,7 +187,7 @@ local function EquipWeapon(category)
     for _, tool in ipairs(backpack:GetChildren()) do
         if tool:IsA("Tool") then
             local toolType = tool:GetAttribute("WeaponType") or tool.ToolTip
-            if toolType == category or (category == "Melee" and tool:FindFirstChild("CombatScript")) or tool.Name:lower():find(category:lower()) then
+            if toolType == category or tool.Name:lower():find(category:lower()) or (category == "Melee" and tool:FindFirstChild("CombatScript")) then
                 Humanoid:EquipTool(tool)
                 return tool
             end
@@ -87,73 +196,30 @@ local function EquipWeapon(category)
     return Character:FindFirstChildOfClass("Tool")
 end
 
--- Fast Attack M1 Spam
-local function TriggerFastAttack()
+-- [[ Fast Attack M1 ]] --
+local function FastAttack()
     if not Settings.FastAttack then return end
-    
-    -- Method 1: VirtualUser Click
     VirtualUser:CaptureController()
     VirtualUser:Button1Down(Vector2.new(0, 0))
     VirtualUser:Button1Up(Vector2.new(0, 0))
     
-    -- Method 2: Combat Framework Register
     local net = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Net")
     if net and net:FindFirstChild("RegisterAttack") then
         net.RegisterAttack:FireServer(0)
     end
 end
 
--- Get Valid Target List
-local function GetPlayerList()
-    local list = {"Auto Nearest"}
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer then
-            table.insert(list, p.Name)
-        end
-    end
-    return list
-end
-
--- Target Selection
-local function GetTarget()
-    if Settings.SelectedTargetName ~= "Auto Nearest" then
-        local specific = Players:FindFirstChild(Settings.SelectedTargetName)
-        if specific and specific.Character and specific.Character:FindFirstChild("Humanoid") and specific.Character.Humanoid.Health > 0 then
-            if not Settings.TargetPvPOnly or IsPvPActive(specific) then
-                return specific
-            end
-        end
-    end
-
-    local nearest = nil
-    local minDist = math.huge
-
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") then
-            if p.Character.Humanoid.Health > 0 and (not Settings.TargetPvPOnly or IsPvPActive(p)) then
-                local dist = (RootPart.Position - p.Character.HumanoidRootPart.Position).Magnitude
-                if dist < minDist then
-                    minDist = dist
-                    nearest = p
-                end
-            end
-        end
-    end
-    return nearest
-end
-
--- Tween to Target (Bypass desync)
-local function TweenToTarget(cframe)
+-- [[ Movement Tween with Dynamic Obstacle Clipping ]] --
+local function TweenToPosition(targetCFrame)
     if not RootPart then return end
-    local dist = (RootPart.Position - cframe.Position).Magnitude
+    local dist = (RootPart.Position - targetCFrame.Position).Magnitude
     local time = dist / Settings.TweenSpeed
     
     if CurrentTween then CurrentTween:Cancel() end
     
     local tweenInfo = TweenInfo.new(time, Enum.EasingStyle.Linear)
-    CurrentTween = TweenService:Create(RootPart, tweenInfo, {CFrame = cframe})
+    CurrentTween = TweenService:Create(RootPart, tweenInfo, {CFrame = targetCFrame})
     
-    -- Anti-Fall & Noclip
     for _, part in ipairs(Character:GetDescendants()) do
         if part:IsA("BasePart") then
             part.CanCollide = false
@@ -164,59 +230,82 @@ local function TweenToTarget(cframe)
     CurrentTween:Play()
 end
 
--- Combat Combo Engine
-local function ExecuteFullCombo(targetChar)
-    local targetHRP = targetChar:FindFirstChild("HumanoidRootPart")
-    local targetHum = targetChar:FindFirstChild("Humanoid")
-    if not targetHRP or not targetHum or targetHum.Health <= 0 then return end
+-- [[ Execute Full Skill & Weapon Combo ]] --
+local function ExecuteCombo(targetChar)
+    local tHRP = targetChar:FindFirstChild("HumanoidRootPart")
+    local tHum = targetChar:FindFirstChild("Humanoid")
+    if not tHRP or not tHum or tHum.Health <= 0 then return end
 
     EnsureHaki()
 
-    -- Cycle All Configured Weapon Types (Melee -> Fruit -> Sword -> Gun)
-    for _, weaponCat in ipairs(Settings.WeaponSequence) do
-        if not Settings.AutoBounty or targetHum.Health <= 0 then break end
+    for _, category in ipairs(Settings.WeaponSequence) do
+        if not Settings.AutoBounty or not IsValidPvPTarget(CurrentTarget) then break end
         
-        EquipWeapon(weaponCat)
-        task.wait(0.1)
+        EquipWeapon(category)
+        task.wait(0.08)
 
-        -- Aim lock to target
-        RootPart.CFrame = CFrame.new(RootPart.Position, targetHRP.Position)
+        -- Lock orientation directly onto target
+        RootPart.CFrame = CFrame.new(RootPart.Position, Vector3.new(tHRP.Position.X, RootPart.Position.Y, tHRP.Position.Z))
 
-        -- M1 Attack Burst
-        for i = 1, 4 do
-            TriggerFastAttack()
-            task.wait(0.08)
+        -- M1 Spam Burst
+        for i = 1, 3 do
+            FastAttack()
+            task.wait(0.06)
         end
 
         -- Cast Skills
-        for _, skillKey in ipairs(Settings.Skills) do
-            if targetHum.Health <= 0 or not Settings.AutoBounty then break end
-            
-            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode[skillKey], false, game)
-            task.wait(0.12)
-            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode[skillKey], false, game)
-            task.wait(0.3)
+        for _, key in ipairs(Settings.Skills) do
+            if not IsValidPvPTarget(CurrentTarget) then break end
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode[key], false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode[key], false, game)
+            task.wait(0.25)
         end
     end
 end
 
--- Main Combat Loop
+-- [[ Main Combat Engine ]] --
 task.spawn(function()
     while true do
         task.wait(0.05)
+        
         if Settings.AutoBounty then
-            CurrentTarget = GetTarget()
+            -- Validate current target real-time
+            if not IsValidPvPTarget(CurrentTarget) then
+                if CurrentTarget then
+                    BlacklistCurrentTarget("Entered SafeZone or PvP Disabled")
+                end
+                CurrentTarget = AcquireNextTarget()
+                TargetLockTime = tick()
+                TargetInitialHealth = CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") and CurrentTarget.Character.Humanoid.Health or nil
+            end
+
+            -- Combat Execution & Health Stall Detection
             if CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
                 local tHRP = CurrentTarget.Character.HumanoidRootPart
                 local tHum = CurrentTarget.Character:FindFirstChild("Humanoid")
                 
-                if tHum and tHum.Health > 0 then
-                    -- Position locked behind/above target for optimal hit registration
-                    local attackCFrame = tHRP.CFrame * CFrame.new(0, 0, Settings.AttackDistance)
-                    TweenToTarget(attackCFrame)
+                -- Check if target is in safe zone mid-flight
+                if IsPositionInSafeZone(tHRP.Position) then
+                    BlacklistCurrentTarget("Target ran into SafeZone")
+                else
+                    -- Move to target
+                    local targetPos = tHRP.CFrame * CFrame.new(0, 0, Settings.AttackDistance)
+                    TweenToPosition(targetPos)
                     
-                    if (RootPart.Position - attackCFrame.Position).Magnitude <= 10 then
-                        ExecuteFullCombo(CurrentTarget.Character)
+                    -- Damage Stall Checker (Anti-Invincible / Exploit Desync)
+                    if Settings.SkipStuckTargets and TargetInitialHealth and (tick() - TargetLockTime > Settings.TargetTimeout) then
+                        if tHum and tHum.Health >= TargetInitialHealth then
+                            BlacklistCurrentTarget("Health not decreasing (Invulnerable/Glitch)")
+                        else
+                            TargetInitialHealth = tHum and tHum.Health or nil
+                            TargetLockTime = tick()
+                        end
+                    end
+                    
+                    -- Trigger Attacks when in Range
+                    if (RootPart.Position - tHRP.Position).Magnitude <= 15 then
+                        ExecuteCombo(CurrentTarget.Character)
                     end
                 end
             end
@@ -224,103 +313,119 @@ task.spawn(function()
     end
 end)
 
--- [[ Modern Custom Dark UI ]] --
+-- [[ High Performance Modern UI ]] --
 local function BuildUI()
     local ScreenGui = Instance.new("ScreenGui")
-    ScreenGui.Name = "OnyxBountyUI"
+    ScreenGui.Name = "OnyxBountyPro"
     ScreenGui.ResetOnSpawn = false
     
     local success, coreGui = pcall(function() return game:GetService("CoreGui") end)
     ScreenGui.Parent = success and coreGui or LocalPlayer:WaitForChild("PlayerGui")
 
-    local MainFrame = Instance.new("Frame")
-    MainFrame.Size = UDim2.new(0, 320, 0, 380)
-    MainFrame.Position = UDim2.new(0.5, -160, 0.3, 0)
-    MainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
-    MainFrame.BorderSizePixel = 0
-    MainFrame.Active = true
-    MainFrame.Draggable = true
-    MainFrame.Parent = ScreenGui
+    local Main = Instance.new("Frame")
+    Main.Size = UDim2.new(0, 330, 0, 420)
+    Main.Position = UDim2.new(0.5, -165, 0.25, 0)
+    Main.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+    Main.BorderSizePixel = 0
+    Main.Active = true
+    Main.Draggable = true
+    Main.Parent = ScreenGui
 
-    local UICorner = Instance.new("UICorner", MainFrame)
-    UICorner.CornerRadius = UDim.new(0, 10)
+    local MainCorner = Instance.new("UICorner", Main)
+    MainCorner.CornerRadius = UDim.new(0, 8)
 
-    local UIStroke = Instance.new("UIStroke", MainFrame)
-    UIStroke.Color = Color3.fromRGB(70, 70, 90)
-    UIStroke.Thickness = 1.5
+    local Stroke = Instance.new("UIStroke", Main)
+    Stroke.Color = Color3.fromRGB(80, 80, 110)
+    Stroke.Thickness = 1.5
 
-    -- Title
-    local Title = Instance.new("TextLabel", MainFrame)
-    Title.Size = UDim2.new(1, 0, 0, 40)
-    Title.Text = "ONYX BOUNTY HUNTER v68"
-    Title.TextColor3 = Color3.fromRGB(240, 240, 255)
+    local Title = Instance.new("TextLabel", Main)
+    Title.Size = UDim2.new(1, 0, 0, 42)
+    Title.Text = "ONYX BOUNTY PRO v68"
+    Title.TextColor3 = Color3.fromRGB(255, 255, 255)
     Title.Font = Enum.Font.GothamBold
     Title.TextSize = 14
     Title.BackgroundTransparency = 1
 
-    local Layout = Instance.new("UIListLayout", MainFrame)
-    Layout.SortOrder = Enum.SortOrder.LayoutOrder
+    local Container = Instance.new("ScrollingFrame", Main)
+    Container.Size = UDim2.new(1, -20, 1, -50)
+    Container.Position = UDim2.new(0, 10, 0, 45)
+    Container.BackgroundTransparency = 1
+    Container.ScrollBarThickness = 2
+    Container.CanvasSize = UDim2.new(0, 0, 0, 360)
+
+    local Layout = Instance.new("UIListLayout", Container)
     Layout.Padding = UDim.new(0, 8)
     Layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 
-    local function CreateButton(text, defaultState, callback)
-        local btn = Instance.new("TextButton", MainFrame)
-        btn.Size = UDim2.new(0.9, 0, 0, 38)
-        btn.BackgroundColor3 = defaultState and Color3.fromRGB(45, 120, 75) or Color3.fromRGB(35, 35, 45)
-        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    local function AddToggle(text, state, callback)
+        local btn = Instance.new("TextButton", Container)
+        btn.Size = UDim2.new(1, 0, 0, 36)
+        btn.BackgroundColor3 = state and Color3.fromRGB(40, 130, 80) or Color3.fromRGB(30, 30, 38)
+        btn.TextColor3 = Color3.fromRGB(245, 245, 245)
         btn.Font = Enum.Font.GothamMedium
-        btn.TextSize = 13
-        btn.Text = text .. ": " .. (defaultState and "ON" or "OFF")
+        btn.TextSize = 12
+        btn.Text = text .. ": " .. (state and "ON" or "OFF")
         
-        local btnCorner = Instance.new("UICorner", btn)
-        btnCorner.CornerRadius = UDim.new(0, 6)
-        
-        local state = defaultState
+        local corner = Instance.new("UICorner", btn)
+        corner.CornerRadius = UDim.new(0, 6)
+
+        local current = state
         btn.MouseButton1Click:Connect(function()
-            state = not state
-            btn.BackgroundColor3 = state and Color3.fromRGB(45, 120, 75) or Color3.fromRGB(35, 35, 45)
-            btn.Text = text .. ": " .. (state and "ON" or "OFF")
-            callback(state)
+            current = not current
+            btn.BackgroundColor3 = current and Color3.fromRGB(40, 130, 80) or Color3.fromRGB(30, 30, 38)
+            btn.Text = text .. ": " .. (current and "ON" or "OFF")
+            callback(current)
         end)
     end
 
-    -- Controls
-    CreateButton("Auto Bounty Hunt", Settings.AutoBounty, function(val)
-        Settings.AutoBounty = val
-        if not val and CurrentTween then CurrentTween:Cancel() end
+    AddToggle("Auto Bounty Hunt", Settings.AutoBounty, function(v)
+        Settings.AutoBounty = v
+        if not v and CurrentTween then CurrentTween:Cancel() end
     end)
 
-    CreateButton("Target PvP Players Only", Settings.TargetPvPOnly, function(val)
-        Settings.TargetPvPOnly = val
+    AddToggle("Strict SafeZone Bypass", Settings.StrictSafeZoneCheck, function(v)
+        Settings.StrictSafeZoneCheck = v
     end)
 
-    CreateButton("Fast Attack (M1 Spam)", Settings.FastAttack, function(val)
-        Settings.FastAttack = val
+    AddToggle("Target PvP Players Only", Settings.TargetPvPOnly, function(v)
+        Settings.TargetPvPOnly = v
     end)
 
-    CreateButton("Auto Buso Haki", Settings.AutoHaki, function(val)
-        Settings.AutoHaki = val
+    AddToggle("Skip Stuck/Immortal Targets", Settings.SkipStuckTargets, function(v)
+        Settings.SkipStuckTargets = v
     end)
 
-    -- Target Selector Display
-    local TargetLabel = Instance.new("TextLabel", MainFrame)
-    TargetLabel.Size = UDim2.new(0.9, 0, 0, 32)
-    TargetLabel.BackgroundColor3 = Color3.fromRGB(28, 28, 35)
-    TargetLabel.TextColor3 = Color3.fromRGB(200, 200, 220)
-    TargetLabel.Font = Enum.Font.Gotham
-    TargetLabel.TextSize = 12
-    TargetLabel.Text = "Target: Auto Nearest (PvP Active)"
-    local tCorner = Instance.new("UICorner", TargetLabel)
-    tCorner.CornerRadius = UDim.new(0, 6)
+    AddToggle("Fast Attack (M1)", Settings.FastAttack, function(v)
+        Settings.FastAttack = v
+    end)
 
-    -- Status Updater
+    AddToggle("Auto Buso Haki", Settings.AutoHaki, function(v)
+        Settings.AutoHaki = v
+    end)
+
+    -- Status Card
+    local StatusCard = Instance.new("TextLabel", Container)
+    StatusCard.Size = UDim2.new(1, 0, 0, 48)
+    StatusCard.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
+    StatusCard.TextColor3 = Color3.fromRGB(200, 220, 255)
+    StatusCard.Font = Enum.Font.Gotham
+    StatusCard.TextSize = 11
+    StatusCard.TextWrapped = true
+    StatusCard.Text = "Status: Idle"
+    local sCorner = Instance.new("UICorner", StatusCard)
+    sCorner.CornerRadius = UDim.new(0, 6)
+
     task.spawn(function()
         while ScreenGui.Parent do
-            task.wait(0.5)
-            if CurrentTarget and CurrentTarget.Character then
-                TargetLabel.Text = "Hunting: " .. CurrentTarget.Name .. " (" .. tostring(math.floor(CurrentTarget.Character.Humanoid.Health)) .. " HP)"
+            task.wait(0.4)
+            if not Settings.AutoBounty then
+                StatusCard.Text = "Status: Bot Disabled"
+            elseif CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") then
+                local hp = math.floor(CurrentTarget.Character.Humanoid.Health)
+                local maxHp = math.floor(CurrentTarget.Character.Humanoid.MaxHealth)
+                StatusCard.Text = string.format("Hunting: %s\nHP: %d/%d | Dist: %dm", CurrentTarget.Name, hp, maxHp, math.floor((RootPart.Position - CurrentTarget.Character.HumanoidRootPart.Position).Magnitude))
             else
-                TargetLabel.Text = "Status: Searching for PvP targets..."
+                StatusCard.Text = "Status: Scanning for valid PvP targets outside SafeZones..."
             end
         end
     end)
