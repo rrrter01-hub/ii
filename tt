@@ -1,123 +1,38 @@
--- [[ Blox Fruits Zero-Bug Overhead Bounty Engine v68 ]] --
--- Fixes: In-Range Only Watchdog, 80-Stud Hitbox Extension, Y+8 Direct Overhead Aimlock, True Blacklist
+-- [[ Blox Fruits Stable Overhead Bounty Hunter v68 ]] --
+-- Architecture: Overhead Hover (Y+12), BodyVelocity Anchor, Combat Framework Fast Attack, Real Hit Reg
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 local VirtualUser = game:GetService("VirtualUser")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
-local Camera = Workspace.CurrentCamera
 local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 local RootPart = Character:WaitForChild("HumanoidRootPart")
 local Humanoid = Character:WaitForChild("Humanoid")
 
--- [[ Configuration ]] --
+-- [[ Master Configuration ]] --
 local Config = {
     Enabled = false,
-    OverheadDistance = 8,      -- ความสูงเหนือหัว 8 studs (ระยะฮิตบ็อกซ์หมัดโดน 100%)
-    FlySpeed = 350,
-    DamageTimeout = 1.5,       -- นับเฉพาะตอนเข้าตีแล้ว: ถ้าเลือดไม่ลดใน 1.5 วิ = SafeZone ดีดทิ้งทันที
-    BlacklistDuration = 60,    -- พักตัวที่อยู่ในเซฟ 60 วินาที
+    OverheadDistance = 11,   -- ความสูงเหนือหัวเป้าหมาย (studs)
+    FlySpeed = 300,
     FastAttack = true,
-    AutoPvP = true,
     AutoHaki = true,
+    SkillSpam = true,
     Skills = {"Z", "X", "C", "V"},
     Weapons = {"Melee", "Sword", "Blox Fruit"}
 }
 
 local CurrentTarget = nil
-local Blacklist = {} -- [Player] = ExpireTimestamp
-local InCombatRange = false
-local CombatStartTimestamp = 0
-local RecordedTargetHealth = nil
 local BodyVel = nil
 local CombatFramework = nil
 local ActiveController = nil
 
--- [[ Hardcoded SafeZone Database (Sea 1, 2, 3) ]] --
-local KnownSafeZones = {
-    {Pos = Vector3.new(-380, 73, 290), Radius = 280, Name = "Cafe (Sea 2)"},
-    {Pos = Vector3.new(-2425, 73, -3200), Radius = 220, Name = "Green Zone (Sea 2)"},
-    {Pos = Vector3.new(-280, 50, 5800), Radius = 260, Name = "Colosseum (Sea 2)"},
-    {Pos = Vector3.new(-5085, 314, -3156), Radius = 340, Name = "Castle on Sea (Sea 3)"},
-    {Pos = Vector3.new(-12463, 375, -7551), Radius = 320, Name = "Mansion (Sea 3)"},
-    {Pos = Vector3.new(-290, 44, 5580), Radius = 240, Name = "Port Town (Sea 3)"},
-    {Pos = Vector3.new(5700, 610, -270), Radius = 250, Name = "Hydra Island (Sea 3)"},
-    {Pos = Vector3.new(980, 16, 1425), Radius = 220, Name = "Pirate Starter (Sea 1)"},
-    {Pos = Vector3.new(-2855, 72, 5350), Radius = 220, Name = "Marine Starter (Sea 1)"},
-    {Pos = Vector3.new(-650, 15, 1580), Radius = 240, Name = "Jungle (Sea 1)"},
-    {Pos = Vector3.new(-680, 15, 880), Radius = 260, Name = "Middle Island (Sea 1)"}
-}
-
--- [[ Dynamic SafeZone Scanner ]] --
-local ScannedSafeZones = {}
-for _, obj in ipairs(Workspace:GetDescendants()) do
-    if (obj.Name:lower():find("safezone") or obj.Name:lower():find("safe_zone")) and obj:IsA("BasePart") then
-        table.insert(ScannedSafeZones, obj)
-    end
-end
-
-local function IsInSafeZone(pos)
-    for _, sz in ipairs(KnownSafeZones) do
-        if (pos - sz.Pos).Magnitude <= sz.Radius then return true end
-    end
-    for _, part in ipairs(ScannedSafeZones) do
-        if part and part.Parent then
-            local rel = part.CFrame:PointToObjectSpace(pos)
-            local half = part.Size / 2
-            if math.abs(rel.X) <= half.X and math.abs(rel.Y) <= half.Y and math.abs(rel.Z) <= half.Z then
-                return true
-            end
-        end
-    end
-    return false
-end
-
--- [[ Target Validation ]] --
-local function IsValidTarget(player)
-    if not player or player == LocalPlayer or not player.Parent then return false end
-    if Blacklist[player] and tick() < Blacklist[player] then return false end
-
-    local char = player.Character
-    if not char then return false end
-
-    local hum = char:FindFirstChild("Humanoid")
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hum or not hrp or hum.Health <= 0 then return false end
-
-    if char:FindFirstChildOfClass("ForceField") or char:FindFirstChild("SafeZoneShield") or char:FindFirstChild("PvPDisabled") then
-        return false
-    end
-
-    local data = player:FindFirstChild("Data")
-    if data and data:FindFirstChild("PvP") and data.PvP.Value == false then
-        return false
-    end
-
-    if IsInSafeZone(hrp.Position) then
-        return false
-    end
-
-    return true
-end
-
--- [[ Target Dropper & Blacklist ]] --
-local function DropTarget(reason)
-    if CurrentTarget then
-        Blacklist[CurrentTarget] = tick() + Config.BlacklistDuration
-        print(string.format("[Watchdog] ❌ Blacklisted Target: %s | Reason: %s", CurrentTarget.Name, reason or "SafeZone/Immune"))
-    end
-    CurrentTarget = nil
-    InCombatRange = false
-    CombatStartTimestamp = 0
-    RecordedTargetHealth = nil
-end
-
--- [[ Physics Anchor ]] --
-local function MaintainAnchor()
+-- [[ Anti-Fall / Anti-Physics Desync (BodyVelocity Anchor) ]] --
+local function EnsurePhysicsAnchor()
     if not RootPart then return end
     if not BodyVel or BodyVel.Parent ~= RootPart then
         if BodyVel then BodyVel:Destroy() end
@@ -125,19 +40,19 @@ local function MaintainAnchor()
         BodyVel.Name = "OnyxAnchor"
         BodyVel.Velocity = Vector3.new(0, 0, 0)
         BodyVel.MaxForce = Vector3.new(9e9, 9e9, 9e9)
-        BodyVel.P = 1500
+        BodyVel.P = 1250
         BodyVel.Parent = RootPart
     end
 end
 
-local function ClearAnchor()
+local function RemovePhysicsAnchor()
     if BodyVel then
         BodyVel:Destroy()
         BodyVel = nil
     end
 end
 
--- [[ Infinite Noclip ]] --
+-- [[ Infinite Noclip Loop (Stepped) ]] --
 RunService.Stepped:Connect(function()
     if Config.Enabled and Character then
         for _, part in ipairs(Character:GetDescendants()) do
@@ -152,67 +67,121 @@ RunService.Stepped:Connect(function()
     end
 end)
 
+-- Character Refresh
 LocalPlayer.CharacterAdded:Connect(function(char)
     Character = char
     RootPart = char:WaitForChild("HumanoidRootPart")
     Humanoid = char:WaitForChild("Humanoid")
     task.wait(0.5)
-    MaintainAnchor()
+    EnsurePhysicsAnchor()
 end)
 
--- [[ Hook Combat Framework ]] --
-pcall(function()
-    local pScripts = LocalPlayer:FindFirstChild("PlayerScripts")
-    if pScripts and pScripts:FindFirstChild("CombatFramework") then
-        CombatFramework = require(pScripts.CombatFramework)
-        ActiveController = CombatFramework.activeController
-    end
-end)
-
--- [[ Force Enable PvP & Auto Haki ]] --
-local function CheckPvPAndHaki()
+-- [[ Hook Blox Fruits Combat Controller (Real Damage Hits) ]] --
+local function SetupCombatHooks()
     pcall(function()
-        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
-        local commF = remotes and remotes:FindFirstChild("CommF_")
-        if commF then
-            if Config.AutoPvP then
-                commF:InvokeServer("EnablePvP")
-                commF:InvokeServer("PvP", true)
-            end
-            if Config.AutoHaki and Character and not Character:FindFirstChild("HasBuso") then
-                commF:InvokeServer("Buso")
-            end
+        local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
+        if playerScripts and playerScripts:FindFirstChild("CombatFramework") then
+            CombatFramework = require(playerScripts.CombatFramework)
+            ActiveController = CombatFramework.activeController
         end
     end)
 end
+SetupCombatHooks()
 
--- [[ Target Selector ]] --
-local function GetNearestValidTarget()
-    local now = tick()
-    for p, exp in pairs(Blacklist) do
-        if now >= exp then Blacklist[p] = nil end
+-- [[ Auto Buso Haki ]] --
+local function CheckHaki()
+    if not Config.AutoHaki or not Character then return end
+    if not Character:FindFirstChild("HasBuso") then
+        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+        local commF = remotes and remotes:FindFirstChild("CommF_")
+        if commF then
+            commF:InvokeServer("Buso")
+        end
     end
+end
 
+-- [[ SafeZone Cache ]] --
+local SafeZones = {}
+for _, obj in ipairs(Workspace:GetDescendants()) do
+    if (obj.Name == "SafeZone" or obj.Name:lower():find("safezone")) and obj:IsA("BasePart") then
+        table.insert(SafeZones, obj)
+    end
+end
+
+local function IsInSafeZone(pos)
+    for _, zone in ipairs(SafeZones) do
+        if zone and zone.Parent then
+            local rel = zone.CFrame:PointToObjectSpace(pos)
+            local sz = zone.Size / 2
+            if math.abs(rel.X) <= sz.X and math.abs(rel.Y) <= sz.Y and math.abs(rel.Z) <= sz.Z then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- [[ Strict Single Target Selection ]] --
+local function GetBestTarget()
     local best = nil
-    local minDist = math.huge
+    local shortest = math.huge
 
     for _, p in ipairs(Players:GetPlayers()) do
-        if IsValidTarget(p) then
-            local dist = (RootPart.Position - p.Character.HumanoidRootPart.Position).Magnitude
-            if dist < minDist then
-                minDist = dist
-                best = p
+        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") then
+            local char = p.Character
+            local hum = char.Humanoid
+            local hrp = char.HumanoidRootPart
+
+            if hum.Health > 0 and not char:FindFirstChildOfClass("ForceField") and not char:FindFirstChild("PvPDisabled") then
+                if not IsInSafeZone(hrp.Position) then
+                    local dist = (RootPart.Position - hrp.Position).Magnitude
+                    if dist < shortest then
+                        shortest = dist
+                        best = p
+                    end
+                end
             end
         end
     end
     return best
 end
 
--- [[ Equip Weapon ]] --
-local function AutoEquipWeapon()
+-- [[ Real Fast Attack Registration ]] --
+local function ExecuteFastAttack()
+    if not Config.FastAttack then return end
+
+    -- 1. In-game Controller Attack Trigger
+    if ActiveController and ActiveController.attack then
+        pcall(function()
+            ActiveController.timeToNextAttack = 0
+            ActiveController.hitboxMagnitude = 60
+            ActiveController:attack()
+        end)
+    end
+
+    -- 2. Tool Activate & Hardware Emulation Fallback
+    local currentTool = Character:FindFirstChildOfClass("Tool")
+    if currentTool then
+        currentTool:Activate()
+    end
+    
+    VirtualUser:CaptureController()
+    VirtualUser:Button1Down(Vector2.new(0, 0))
+    VirtualUser:Button1Up(Vector2.new(0, 0))
+
+    -- 3. Remote Event Trigger
+    local net = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Net")
+    if net and net:FindFirstChild("RegisterAttack") then
+        net.RegisterAttack:FireServer(0)
+    end
+end
+
+-- [[ Auto Equip Best Weapon ]] --
+local function EquipPreferredWeapon()
     local backpack = LocalPlayer:FindFirstChild("Backpack")
     if not backpack or not Character then return end
 
+    -- Prioritize currently holding or pick first available category
     if not Character:FindFirstChildOfClass("Tool") then
         for _, category in ipairs(Config.Weapons) do
             for _, tool in ipairs(backpack:GetChildren()) do
@@ -228,139 +197,65 @@ local function AutoEquipWeapon()
     end
 end
 
--- [[ Fast Attack M1 ]] --
-local function AttackM1()
-    if not Config.FastAttack then return end
+-- [[ Smooth Overhead Flight Movement ]] --
+local function HoverOverhead(targetHRP)
+    EnsurePhysicsAnchor()
+    
+    -- Target overhead position: 11 studs directly above the target, aiming downward
+    local overheadCFrame = CFrame.new(targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0)) * CFrame.Angles(math.rad(-90), 0, 0)
+    local currentPos = RootPart.Position
+    local targetPos = overheadCFrame.Position
+    local dist = (currentPos - targetPos).Magnitude
 
-    if ActiveController and ActiveController.attack then
-        pcall(function()
-            ActiveController.timeToNextAttack = 0
-            ActiveController.hitboxMagnitude = 80 -- ขยายฮิตบ็อกซ์ให้ฟันถึงตัว 100%
-            ActiveController:attack()
-        end)
-    end
-
-    local tool = Character:FindFirstChildOfClass("Tool")
-    if tool then tool:Activate() end
-
-    VirtualUser:CaptureController()
-    VirtualUser:Button1Down(Vector2.new(0, 0))
-    VirtualUser:Button1Up(Vector2.new(0, 0))
-
-    local net = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Net")
-    if net and net:FindFirstChild("RegisterAttack") then
-        net.RegisterAttack:FireServer(0)
+    if dist > 150 then
+        -- Fast Linear Movement for distance
+        RootPart.CFrame = CFrame.new(currentPos:Lerp(targetPos, (Config.FlySpeed * 0.03) / dist))
+    else
+        -- Lock onto overhead spot
+        RootPart.CFrame = overheadCFrame
     end
 end
 
--- [[ AimLock ]] --
-local function AimLock(pos)
-    Camera.CFrame = CFrame.new(Camera.CFrame.Position, pos)
-end
-
--- [[ THREAD 1: Continuous M1 Fast Attack ]] --
+-- [[ Combat Loop: Overhead Lock + Fast Attack + Skills ]] --
 task.spawn(function()
     while true do
         task.wait(0.02)
-        if Config.Enabled and CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
-            local tHRP = CurrentTarget.Character.HumanoidRootPart
-            if (RootPart.Position - tHRP.Position).Magnitude <= (Config.OverheadDistance + 8) then
-                AutoEquipWeapon()
-                AttackM1()
-            end
-        end
-    end
-end)
-
--- [[ THREAD 2: Parallel Skills Aimlock ]] --
-task.spawn(function()
-    while true do
-        task.wait(0.08)
-        if Config.Enabled and CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
-            local tHRP = CurrentTarget.Character.HumanoidRootPart
-            local tHum = CurrentTarget.Character:FindFirstChild("Humanoid")
-
-            if (RootPart.Position - tHRP.Position).Magnitude <= (Config.OverheadDistance + 8) and tHum and tHum.Health > 0 then
-                for _, key in ipairs(Config.Skills) do
-                    if not Config.Enabled or not CurrentTarget or tHum.Health <= 0 then break end
-                    AimLock(tHRP.Position)
-                    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode[key], false, game)
-                    task.wait(0.04)
-                    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode[key], false, game)
-                    task.wait(0.12)
-                end
-            end
-        end
-    end
-end)
-
--- [[ THREAD 3: Movement & In-Range Damage Watchdog ]] --
-task.spawn(function()
-    while true do
-        task.wait(0.02)
-
+        
         if Config.Enabled then
-            CheckPvPAndHaki()
-
-            -- 1. Acquire Target if None
-            if not CurrentTarget or not IsValidTarget(CurrentTarget) then
-                if CurrentTarget then
-                    DropTarget("Entered SafeZone or PvP Disabled")
-                end
-                CurrentTarget = GetNearestValidTarget()
-                InCombatRange = false
-                CombatStartTimestamp = 0
-                RecordedTargetHealth = nil
+            -- Check Target Validity
+            if not CurrentTarget or not CurrentTarget.Character or not CurrentTarget.Character:FindFirstChild("Humanoid") or CurrentTarget.Character.Humanoid.Health <= 0 or IsInSafeZone(CurrentTarget.Character.HumanoidRootPart.Position) then
+                CurrentTarget = GetBestTarget()
             end
 
-            -- 2. Follow & Attack Loop
             if CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
                 local tHRP = CurrentTarget.Character.HumanoidRootPart
-                local tHum = CurrentTarget.Character:FindFirstChild("Humanoid")
+                local tHum = CurrentTarget.Character.Humanoid
 
-                -- Real-time SafeZone Check
-                if IsInSafeZone(tHRP.Position) then
-                    DropTarget("Target inside SafeZone")
-                else
-                    MaintainAnchor()
+                -- Lock overhead
+                HoverOverhead(tHRP)
+                CheckHaki()
+                EquipPreferredWeapon()
 
-                    -- Direct Overhead Position (Y + 8 studs, มองตรงไปที่เป้าหมาย)
-                    local overheadCFrame = CFrame.new(tHRP.Position + Vector3.new(0, Config.OverheadDistance, 0), tHRP.Position)
-                    local curPos = RootPart.Position
-                    local targetPos = overheadCFrame.Position
-                    local dist = (curPos - targetPos).Magnitude
+                -- Within Attack Range
+                local dist = (RootPart.Position - tHRP.Position).Magnitude
+                if dist <= (Config.OverheadDistance + 12) then
+                    -- Trigger Fast Attack Spam
+                    ExecuteFastAttack()
 
-                    if dist > 80 then
-                        -- Flight Phase: เคลื่อนที่เข้าหา
-                        RootPart.CFrame = CFrame.new(curPos:Lerp(targetPos, (Config.FlySpeed * 0.02) / dist), tHRP.Position)
-                        InCombatRange = false
-                    else
-                        -- In Range Phase: เกาะหัวเป้าหมาย
-                        RootPart.CFrame = overheadCFrame
-
-                        -- เริ่มจับเวลาดาเมจก็ต่อเมื่อบินถึงหัวแล้วเท่านั้น!
-                        if not InCombatRange then
-                            InCombatRange = true
-                            CombatStartTimestamp = tick()
-                            RecordedTargetHealth = tHum.Health
-                        else
-                            -- ตรวจสอบว่าตี 1.5 วิ แล้วเลือดลดไหม
-                            if tick() - CombatStartTimestamp >= Config.DamageTimeout then
-                                if tHum.Health >= RecordedTargetHealth then
-                                    -- เลือดไม่ลด = SafeZone / อมเลือด -> ดีดทิ้งทันที!
-                                    DropTarget("Zero Damage Registered in 1.5s (SafeZone/Invincible)")
-                                else
-                                    -- เลือดลดปกติ = ตีเข้า! อัปเดตเลือดล่าสุดแล้วล่าต่อ
-                                    RecordedTargetHealth = tHum.Health
-                                    CombatStartTimestamp = tick()
-                                end
-                            end
+                    -- Cast Skills (Rapid cycle)
+                    if Config.SkillSpam then
+                        for _, key in ipairs(Config.Skills) do
+                            if not CurrentTarget or tHum.Health <= 0 then break end
+                            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode[key], false, game)
+                            task.wait(0.04)
+                            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode[key], false, game)
+                            task.wait(0.12)
                         end
                     end
                 end
             end
         else
-            ClearAnchor()
+            RemovePhysicsAnchor()
         end
     end
 end)
@@ -368,16 +263,16 @@ end)
 -- [[ Clean Redz-Style Dark UI ]] --
 local function BuildUI()
     local ScreenGui = Instance.new("ScreenGui")
-    ScreenGui.Name = "OnyxProBountyUI"
+    ScreenGui.Name = "OnyxOverheadHub"
     ScreenGui.ResetOnSpawn = false
     
     local success, coreGui = pcall(function() return game:GetService("CoreGui") end)
     ScreenGui.Parent = success and coreGui or LocalPlayer:WaitForChild("PlayerGui")
 
     local Main = Instance.new("Frame", ScreenGui)
-    Main.Size = UDim2.new(0, 310, 0, 270)
+    Main.Size = UDim2.new(0, 310, 0, 260)
     Main.Position = UDim2.new(0.5, -155, 0.28, 0)
-    Main.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+    Main.BackgroundColor3 = Color3.fromRGB(17, 17, 24)
     Main.BorderSizePixel = 0
     Main.Active = true
     Main.Draggable = true
@@ -386,17 +281,18 @@ local function BuildUI()
     Corner.CornerRadius = UDim.new(0, 8)
 
     local Stroke = Instance.new("UIStroke", Main)
-    Stroke.Color = Color3.fromRGB(85, 90, 130)
+    Stroke.Color = Color3.fromRGB(75, 80, 110)
     Stroke.Thickness = 1.5
 
-    local Title = Instance.new("TextLabel", Main)
-    Title.Size = UDim2.new(1, 0, 0, 38)
-    Title.Text = "BLOXRUITS IN-RANGE BOUNTY v68"
-    Title.TextColor3 = Color3.fromRGB(240, 240, 255)
-    Title.Font = Enum.Font.GothamBold
-    Title.TextSize = 12
-    Title.BackgroundTransparency = 1
+    local Header = Instance.new("TextLabel", Main)
+    Header.Size = UDim2.new(1, 0, 0, 36)
+    Header.Text = "BLOXRUITS OVERHEAD BOUNTY v68"
+    Header.TextColor3 = Color3.fromRGB(245, 245, 255)
+    Header.Font = Enum.Font.GothamBold
+    Header.TextSize = 12
+    Header.BackgroundTransparency = 1
 
+    -- Toggle Button
     local Toggle = Instance.new("TextButton", Main)
     Toggle.Size = UDim2.new(0.9, 0, 0, 44)
     Toggle.Position = UDim2.new(0.05, 0, 0, 44)
@@ -404,47 +300,45 @@ local function BuildUI()
     Toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
     Toggle.Font = Enum.Font.GothamBold
     Toggle.TextSize = 13
-    Toggle.Text = "AUTO BOUNTY: OFF"
+    Toggle.Text = "AUTO OVERHEAD BOUNTY: OFF"
     local tCorner = Instance.new("UICorner", Toggle)
     tCorner.CornerRadius = UDim.new(0, 6)
 
     Toggle.MouseButton1Click:Connect(function()
         Config.Enabled = not Config.Enabled
-        Toggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(40, 160, 90) or Color3.fromRGB(35, 35, 48)
-        Toggle.Text = "AUTO BOUNTY: " .. (Config.Enabled and "RUNNING (LOCKED)" or "OFF")
+        Toggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(40, 150, 90) or Color3.fromRGB(35, 35, 48)
+        Toggle.Text = "AUTO OVERHEAD BOUNTY: " .. (Config.Enabled and "ENABLED (FARMING)" or "OFF")
         if not Config.Enabled then
-            ClearAnchor()
+            RemovePhysicsAnchor()
             CurrentTarget = nil
         end
     end)
 
+    -- Status Monitor
     local Status = Instance.new("TextLabel", Main)
-    Status.Size = UDim2.new(0.9, 0, 0, 150)
+    Status.Size = UDim2.new(0.9, 0, 0, 140)
     Status.Position = UDim2.new(0.05, 0, 0, 98)
-    Status.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
+    Status.BackgroundColor3 = Color3.fromRGB(24, 24, 34)
     Status.TextColor3 = Color3.fromRGB(200, 220, 255)
     Status.Font = Enum.Font.Gotham
-    Status.TextSize = 11
+    Status.TextSize = 12
     Status.TextWrapped = true
-    Status.Text = "Status: Idle\nIn-Range Watchdog: Ready\nHitbox: 80 studs"
+    Status.Text = "Status: Waiting for activation..."
     local sCorner = Instance.new("UICorner", Status)
     sCorner.CornerRadius = UDim.new(0, 6)
 
     task.spawn(function()
         while ScreenGui.Parent do
-            task.wait(0.2)
-            local blCount = 0
-            for _ in pairs(Blacklist) do blCount = blCount + 1 end
-
+            task.wait(0.25)
             if not Config.Enabled then
-                Status.Text = string.format("Mode: IDLE\nHitbox Ext: 80 studs\nSafeZone DB: Active\nBlacklist: %d players", blCount)
+                Status.Text = "Mode: IDLE\nOverhead Position: Locked to Y+11\nFast Attack: Ready"
             elseif CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") then
                 local hp = math.floor(CurrentTarget.Character.Humanoid.Health)
                 local maxHp = math.floor(CurrentTarget.Character.Humanoid.MaxHealth)
-                Status.Text = string.format("🎯 Locked Target: %s\nHP: %d / %d\nCombat State: %s\nOverhead: Y+8 studs\nBlacklisted: %d players",
-                    CurrentTarget.Name, hp, maxHp, InCombatRange and "ATTACKING (In-Range)" or "FLYING TO TARGET", blCount)
+                Status.Text = string.format("Target Locked: %s\nHP: %d / %d\nAltitude: Overhead (+11 studs)\nFast Attack M1: Active\nSkill Spam: Active",
+                    CurrentTarget.Name, hp, maxHp)
             else
-                Status.Text = string.format("Mode: HUNTING\nScanning PvP targets outside SafeZones...\nBlacklisted: %d players", blCount)
+                Status.Text = "Mode: FARMING\nSearching nearest valid PvP target (Outside SafeZones)..."
             end
         end
     end)
