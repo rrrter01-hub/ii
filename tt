@@ -1,5 +1,5 @@
--- [[ Blox Fruits Butter-Smooth Velocity Bounty Hunter v68 ]] --
--- Fixes: Removed CFrame/Physics Conflict, Zero-Stutter Laser Flight, Clean Noclip Penetration
+-- [[ Blox Fruits Auto-Skip Non-PvP & Laser Bounty Hunter v68 ]] --
+-- Features: Non-PvP Pre-Filter, 1.5s In-Range Damage Watchdog (Auto-Skip), Butter-Smooth Flight, Overhead AimLock
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -17,8 +17,10 @@ local Humanoid = Character:WaitForChild("Humanoid")
 -- [[ Master Configuration ]] --
 local Config = {
     Enabled = false,
-    OverheadDistance = 11,   -- ความสูงเหนือหัวเปase (studs)
+    OverheadDistance = 11,   -- ความสูงเหนือหัวเป้าหมาย (studs)
     FlySpeed = 350,          -- ความเร็วบินพุ่ง (studs/s)
+    DamageTimeout = 1.5,     -- ตีถึงตัว 1.5 วิ เลือดไม่ลด = ปิด PvP -> สลับตัวทันที!
+    BlacklistTime = 60,      -- แบนตัวที่ไม่เปิด PvP 60 วินาที
     FastAttack = true,
     AutoHaki = true,
     SkillSpam = true,
@@ -27,11 +29,17 @@ local Config = {
 }
 
 local CurrentTarget = nil
+local Blacklist = {} -- [Player] = ExpireTime
 local FlightVelocity = nil
 local CombatFramework = nil
 local ActiveController = nil
 
--- [[ Pure Physics Flight Engine (No CFrame Overwrite During Flight) ]] --
+-- Watchdog Trackers
+local InCombatRange = false
+local CombatStartTimer = 0
+local InitialRecordedHealth = nil
+
+-- [[ Pure Physics Flight Engine ]] --
 local function EnsureFlightEngine()
     if not RootPart then return end
     if not FlightVelocity or FlightVelocity.Parent ~= RootPart then
@@ -52,7 +60,7 @@ local function StopFlightEngine()
     end
 end
 
--- [[ Clean Noclip (ทะลุทุกสิ่งกีดขวางแบบสมบูรณ์) ]] --
+-- [[ Clean Noclip ]] --
 RunService.Stepped:Connect(function()
     if Config.Enabled and Character then
         for _, part in ipairs(Character:GetChildren()) do
@@ -114,25 +122,73 @@ local function IsInSafeZone(pos)
     return false
 end
 
+-- [[ Strict PvP & Target Filter ]] --
+local function IsValidPvPTarget(player)
+    if not player or player == LocalPlayer or not player.Parent then return false end
+    
+    -- Check Blacklist (พวกปิด PvP หรืออยู่ในเซฟ)
+    if Blacklist[player] and tick() < Blacklist[player] then return false end
+
+    local char = player.Character
+    if not char then return false end
+
+    local hum = char:FindFirstChild("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not hrp or hum.Health <= 0 then return false end
+
+    -- 1. Shield & PvP Disabled Tags
+    if char:FindFirstChildOfClass("ForceField") or char:FindFirstChild("SafeZoneShield") or char:FindFirstChild("PvPDisabled") then
+        return false
+    end
+
+    -- 2. Blox Fruits Data Folder Check
+    local data = player:FindFirstChild("Data")
+    if data then
+        if data:FindFirstChild("PvP") and data.PvP.Value == false then
+            return false
+        end
+        if data:FindFirstChild("Level") and data.Level.Value < 20 then
+            return false
+        end
+    end
+
+    -- 3. SafeZone Location Check
+    if IsInSafeZone(hrp.Position) then
+        return false
+    end
+
+    return true
+end
+
+-- [[ Skip & Blacklist Target ]] --
+local function SkipCurrentTarget(reason)
+    if CurrentTarget then
+        Blacklist[CurrentTarget] = tick() + Config.BlacklistTime
+        print(string.format("[Hunter Watchdog] ⏩ Skipped Target '%s': %s (Blacklisted %ds)", CurrentTarget.Name, reason or "Non-PvP", Config.BlacklistTime))
+    end
+    CurrentTarget = nil
+    InCombatRange = false
+    CombatStartTimer = 0
+    InitialRecordedHealth = nil
+end
+
 -- [[ Target Selector ]] --
 local function GetBestTarget()
+    -- Clear Expired Blacklist
+    local now = tick()
+    for p, expire in pairs(Blacklist) do
+        if now >= expire then Blacklist[p] = nil end
+    end
+
     local best = nil
     local shortest = math.huge
 
     for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") then
-            local char = p.Character
-            local hum = char.Humanoid
-            local hrp = char.HumanoidRootPart
-
-            if hum.Health > 0 and not char:FindFirstChildOfClass("ForceField") and not char:FindFirstChild("PvPDisabled") then
-                if not IsInSafeZone(hrp.Position) then
-                    local dist = (RootPart.Position - hrp.Position).Magnitude
-                    if dist < shortest then
-                        shortest = dist
-                        best = p
-                    end
-                end
+        if IsValidPvPTarget(p) then
+            local dist = (RootPart.Position - p.Character.HumanoidRootPart.Position).Magnitude
+            if dist < shortest then
+                shortest = dist
+                best = p
             end
         end
     end
@@ -191,7 +247,7 @@ local function ExecuteFastAttack()
     end
 end
 
--- [[ Butter-Smooth Flight Movement (ไม่ขัดฟิสิกส์ ไม่กระตุก) ]] --
+-- [[ Butter-Smooth Flight Movement ]] --
 local function SmoothFlight(targetHRP)
     EnsureFlightEngine()
     
@@ -201,8 +257,9 @@ local function SmoothFlight(targetHRP)
     local distance = direction.Magnitude
 
     if distance > 15 then
-        -- 🚀 LASER FLIGHT: ปล่อยให้ BodyVelocity เคลื่อนที่แบบเพียวๆ ลื่น 60 FPS
+        -- 🚀 LASER FLIGHT: พุ่งตรงแบบ 60 FPS
         FlightVelocity.Velocity = direction.Unit * Config.FlySpeed
+        InCombatRange = false
     else
         -- 🎯 OVERHEAD LOCK: ลอยนิ่งเหนือหัว Y+11
         FlightVelocity.Velocity = Vector3.new(0, 0, 0)
@@ -249,23 +306,53 @@ task.spawn(function()
     end
 end)
 
--- [[ Master Navigation Loop ]] --
+-- [[ Master Navigation & 1.5s Non-PvP Auto-Skip Watchdog ]] --
 task.spawn(function()
     while true do
         task.wait(0.02)
         
         if Config.Enabled then
             -- Validate Target
-            if not CurrentTarget or not CurrentTarget.Character or not CurrentTarget.Character:FindFirstChild("Humanoid") or CurrentTarget.Character.Humanoid.Health <= 0 or IsInSafeZone(CurrentTarget.Character.HumanoidRootPart.Position) then
+            if not CurrentTarget or not IsValidPvPTarget(CurrentTarget) then
+                if CurrentTarget then
+                    SkipCurrentTarget("Target invalid / entered SafeZone")
+                end
                 CurrentTarget = GetBestTarget()
+                InCombatRange = false
+                CombatStartTimer = 0
+                InitialRecordedHealth = nil
             end
 
             if CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
                 local tHRP = CurrentTarget.Character.HumanoidRootPart
+                local tHum = CurrentTarget.Character:FindFirstChild("Humanoid")
                 
-                -- Smooth Laser Flight to Target
+                -- Smooth Gliding to Target
                 SmoothFlight(tHRP)
                 CheckHaki()
+
+                -- [[ 1.5s NON-PVP AUTO-SKIP WATCHDOG ]] --
+                local dist = (RootPart.Position - tHRP.Position).Magnitude
+                if dist <= (Config.OverheadDistance + 14) and tHum then
+                    if not InCombatRange then
+                        -- เพิ่งบินมาถึงหัวเป้าหมาย: เริ่มจับเวลาดาเมจ
+                        InCombatRange = true
+                        CombatStartTimer = tick()
+                        InitialRecordedHealth = tHum.Health
+                    else
+                        -- ถึงหัวแล้วเกิน 1.5 วินาที: ตรวจสอบเลือด
+                        if tick() - CombatStartTimer >= Config.DamageTimeout then
+                            if tHum.Health >= InitialRecordedHealth then
+                                -- เลือดไม่ลด = ปิด PvP / อยู่ในโซนอมเลือด -> ข้ามไปหาตัวอื่นทันที!
+                                SkipCurrentTarget("Non-PvP / Zero Damage Detected")
+                            else
+                                -- ตีเข้าปกติ -> รีเฟรชเลือดแล้วล่าต่อจนตาย
+                                InitialRecordedHealth = tHum.Health
+                                CombatStartTimer = tick()
+                            end
+                        end
+                    end
+                end
             end
         else
             StopFlightEngine()
@@ -299,7 +386,7 @@ local function BuildUI()
 
     local Header = Instance.new("TextLabel", Main)
     Header.Size = UDim2.new(1, 0, 0, 36)
-    Header.Text = "BLOXRUITS LASER BOUNTY v68"
+    Header.Text = "BLOXRUITS AUTO-SKIP BOUNTY v68"
     Header.TextColor3 = Color3.fromRGB(245, 245, 255)
     Header.Font = Enum.Font.GothamBold
     Header.TextSize = 12
@@ -320,7 +407,7 @@ local function BuildUI()
     Toggle.MouseButton1Click:Connect(function()
         Config.Enabled = not Config.Enabled
         Toggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(40, 150, 90) or Color3.fromRGB(35, 35, 48)
-        Toggle.Text = "AUTO BOUNTY: " .. (Config.Enabled and "RUNNING (LASER)" or "OFF")
+        Toggle.Text = "AUTO BOUNTY: " .. (Config.Enabled and "RUNNING (AUTO-SKIP)" or "OFF")
         if not Config.Enabled then
             StopFlightEngine()
             CurrentTarget = nil
@@ -343,15 +430,18 @@ local function BuildUI()
     task.spawn(function()
         while ScreenGui.Parent do
             task.wait(0.25)
+            local blCount = 0
+            for _ in pairs(Blacklist) do blCount = blCount + 1 end
+
             if not Config.Enabled then
-                Status.Text = "Mode: IDLE\nEngine: Laser BodyVelocity\nStutter: ELIMINATED (0ms Lag)"
+                Status.Text = string.format("Mode: IDLE\nAuto-Skip Non-PvP: 1.5s Active\nIgnored/Blacklisted: %d players", blCount)
             elseif CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") then
                 local hp = math.floor(CurrentTarget.Character.Humanoid.Health)
                 local maxHp = math.floor(CurrentTarget.Character.Humanoid.MaxHealth)
-                Status.Text = string.format("🎯 Locked Target: %s\nHP: %d / %d\nFlight: Laser Gliding (350 studs/s)\nOverhead: Locked Y+11\nAimLock: ACTIVE",
-                    CurrentTarget.Name, hp, maxHp)
+                Status.Text = string.format("🎯 Locked Target: %s\nHP: %d / %d\nState: %s\nWatchdog: Active (1.5s Probe)\nSkipped: %d players",
+                    CurrentTarget.Name, hp, maxHp, InCombatRange and "ATTACKING (In-Range)" or "GLIDING TO TARGET", blCount)
             else
-                Status.Text = "Mode: FARMING\nSearching nearest valid PvP target (Outside SafeZones)..."
+                Status.Text = string.format("Mode: HUNTING\nScanning next PvP player...\nSkipped Non-PvP: %d players", blCount)
             end
         end
     end)
