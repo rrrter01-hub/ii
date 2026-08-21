@@ -1,5 +1,5 @@
--- [[ Blox Fruits Overhead Bounty Hunter v73 ]] --
--- Architecture: Strict Round-Robin Player Queue (All 12 Players), Zero Obstacle Direct Flight, 0.8s Damage Probe & Skip
+-- [[ Blox Fruits Overhead Bounty Hunter v74 ]] --
+-- Fix: Complete Anti-Rubberband / Desync Fix (Pure Linear Velocity Flight, State Disabler, 12-Queue Fast Hunter)
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -19,7 +19,7 @@ local Humanoid = Character:WaitForChild("Humanoid")
 local Config = {
     Enabled = false,
     OverheadDistance = 11,
-    FlySpeed = 420,
+    FlySpeed = 320,          -- ความเร็วการบินที่เสถียร ไม่โดน Server Rollback
     FastAttack = true,
     AutoHaki = true,
     AutoPvP = true,
@@ -27,20 +27,20 @@ local Config = {
     Skills = {"Z", "X", "C", "V"},
     Weapons = {"Melee", "Sword", "Blox Fruit", "Gun"},
     WeaponSwitchDelay = 0.6,
-    DamageTestTime = 0.8      -- ตี 0.8 วิ ถ้าเลือดไม่ลดเลย = ข้ามไปหาคนถัดไปทันที
+    DamageTestTime = 0.8     -- ทดสอบดาเมจ 0.8 วินาที
 }
 
 local CurrentTarget = nil
-local BodyVel = nil
+local FlightVelocity = nil
 local CombatFramework = nil
 local ActiveController = nil
 local LastWeaponSwitch = 0
 local CurrentWeaponIndex = 1
 
--- [[ 12-Player Round-Robin Queue Engine ]] --
+-- 12-Player Round-Robin Queue
 local TargetQueue = {}
 local QueueIndex = 1
-local TriedPlayers = {} -- รายชื่อคนที่ลองไปแล้วในรอบนี้
+local TriedPlayers = {}
 local ProbeStartTime = 0
 local ProbeStartHP = 0
 local IsProbingDamage = false
@@ -52,38 +52,38 @@ local NetModule = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStor
 local RegisterAttack = NetModule and (NetModule:FindFirstChild("RegisterAttack") or NetModule:FindFirstChild("RE/RegisterAttack"))
 local RegisterHit = NetModule and (NetModule:FindFirstChild("RegisterHit") or NetModule:FindFirstChild("RE/RegisterHit"))
 
--- [[ Physics Anchor ]] --
-local function EnsurePhysicsAnchor()
+-- [[ Anti-Rubberband Flight Controller ]] --
+local function InitFlightController()
     if not RootPart then return end
-    if not BodyVel or BodyVel.Parent ~= RootPart then
-        if BodyVel then BodyVel:Destroy() end
-        BodyVel = Instance.new("BodyVelocity")
-        BodyVel.Name = "OnyxAnchor"
-        BodyVel.Velocity = Vector3.new(0, 0, 0)
-        BodyVel.MaxForce = Vector3.new(9e9, 9e9, 9e9)
-        BodyVel.P = 3000
-        BodyVel.Parent = RootPart
+    if not FlightVelocity or FlightVelocity.Parent ~= RootPart then
+        if FlightVelocity then FlightVelocity:Destroy() end
+        FlightVelocity = Instance.new("BodyVelocity")
+        FlightVelocity.Name = "AntiDesyncFlight"
+        FlightVelocity.Velocity = Vector3.new(0, 0, 0)
+        FlightVelocity.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+        FlightVelocity.P = 10000
+        FlightVelocity.Parent = RootPart
     end
 end
 
-local function RemovePhysicsAnchor()
-    if BodyVel then
-        BodyVel:Destroy()
-        BodyVel = nil
+local function KillFlightController()
+    if FlightVelocity then
+        FlightVelocity:Destroy()
+        FlightVelocity = nil
     end
 end
 
--- [[ Stepped Noclip ]] --
-RunService.Stepped:Connect(function()
-    if Config.Enabled and Character then
+-- [[ Anti-Desync Collision & Physics Stabilizer ]] --
+RunService.Heartbeat:Connect(function()
+    if Config.Enabled and Character and RootPart then
+        -- ป้องกันการชนและอาการกระตุกถอยหลัง (Rubberbanding)
         for _, part in ipairs(Character:GetDescendants()) do
             if part:IsA("BasePart") then
                 part.CanCollide = false
             end
         end
-        if RootPart then
-            RootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            RootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        if Humanoid then
+            Humanoid.PlatformStand = true
         end
     end
 end)
@@ -93,7 +93,7 @@ LocalPlayer.CharacterAdded:Connect(function(char)
     RootPart = char:WaitForChild("HumanoidRootPart")
     Humanoid = char:WaitForChild("Humanoid")
     task.wait(0.5)
-    EnsurePhysicsAnchor()
+    InitFlightController()
     SetupCombatHooks()
 end)
 
@@ -125,7 +125,7 @@ local function EnsurePvPAndHaki()
     end)
 end
 
--- [[ Refresh 12-Player Queue ]] --
+-- [[ 12-Player Queue Management ]] --
 local function RefreshPlayerQueue()
     TargetQueue = {}
     for _, p in ipairs(Players:GetPlayers()) do
@@ -136,10 +136,8 @@ local function RefreshPlayerQueue()
     QueueIndex = 1
 end
 
--- [[ Get Next Target from Queue (Round-Robin) ]] --
-local function GetNextTargetFromQueue()
+local function GetNextTarget()
     if #TargetQueue == 0 or QueueIndex > #TargetQueue then
-        -- ถ้าลองครบทุกคนในเซิร์ฟแล้ว รีเซ็ตรายชื่อแล้ววนรอบใหม่
         RefreshPlayerQueue()
         TriedPlayers = {}
     end
@@ -149,7 +147,6 @@ local function GetNextTargetFromQueue()
         local p = TargetQueue[QueueIndex]
         QueueIndex = QueueIndex + 1
 
-        -- เช็คว่าตัวละครอยู่ในเกมและยังมีชีวิตอยู่
         if p and p.Parent and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") then
             if p.Character.Humanoid.Health > 0 and not TriedPlayers[p.UserId] then
                 candidate = p
@@ -158,7 +155,6 @@ local function GetNextTargetFromQueue()
         end
     end
 
-    -- ถ้าหาในคิวปัจจุบันไม่เจอ ให้รีเซ็ตคิวทันที
     if not candidate then
         RefreshPlayerQueue()
         TriedPlayers = {}
@@ -241,24 +237,29 @@ local function CastSkills(targetHRP, targetHum)
     end
 end
 
--- [[ Direct Missile Flight (Pure Vector - Zero Delay) ]] --
-local function FlyDirectToTarget(targetHRP)
-    EnsurePhysicsAnchor()
-    local targetPos = targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0)
-    local targetCF = CFrame.new(targetPos, targetHRP.Position) * CFrame.Angles(math.rad(-90), 0, 0)
+-- [[ Smooth Vector-Based Flight (No Teleport Lag, No Rubberbanding) ]] --
+local function MoveTowardsTarget(targetHRP)
+    InitFlightController()
     
+    local targetPos = targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0)
     local curPos = RootPart.Position
-    local dist = (curPos - targetPos).Magnitude
+    local delta = (targetPos - curPos)
+    local dist = delta.Magnitude
 
-    if dist > 25 then
-        local step = math.clamp((Config.FlySpeed * 0.02) / dist, 0, 1)
-        RootPart.CFrame = CFrame.new(curPos:Lerp(targetPos, step), targetHRP.Position)
+    -- หมุนตัวเล็งลงหาหัวเป้าหมายตลอดเวลา
+    RootPart.CFrame = CFrame.new(curPos, targetHRP.Position) * CFrame.Angles(math.rad(-90), 0, 0)
+
+    if dist > 8 then
+        -- บินด้วยความเร็วเวกเตอร์สม่ำเสมอ ป้องกันเซิร์ฟเวอร์ดึงกลับ
+        FlightVelocity.Velocity = delta.Unit * Config.FlySpeed
     else
-        RootPart.CFrame = targetCF
+        -- เข้าจุด overhead แล้วหยุดนิ่งบนหัวทันที
+        FlightVelocity.Velocity = Vector3.new(0, 0, 0)
+        RootPart.CFrame = CFrame.new(targetPos, targetHRP.Position) * CFrame.Angles(math.rad(-90), 0, 0)
     end
 end
 
--- [[ Master Queue & Execution Loop ]] --
+-- [[ Master Combat & Queue Loop ]] --
 task.spawn(function()
     while true do
         task.wait(0.015)
@@ -274,7 +275,7 @@ task.spawn(function()
                 or not CurrentTarget.Character:FindFirstChild("Humanoid")
                 or CurrentTarget.Character.Humanoid.Health <= 0 then
                 
-                CurrentTarget = GetNextTargetFromQueue()
+                CurrentTarget = GetNextTarget()
                 IsProbingDamage = false
                 ProbeStartTime = 0
                 ProbeStartHP = 0
@@ -284,35 +285,32 @@ task.spawn(function()
                 local tHRP = CurrentTarget.Character.HumanoidRootPart
                 local tHum = CurrentTarget.Character.Humanoid
 
-                -- บินพุ่งตรงปักหัวเป้าหมายทันที
-                FlyDirectToTarget(tHRP)
+                -- เคลื่อนที่ไปหาเป้าหมายแบบ Smooth Vector
+                MoveTowardsTarget(tHRP)
 
                 local dist = (RootPart.Position - tHRP.Position).Magnitude
 
-                -- เมื่อถึงระยะเหนือหัว (11 + 15 studs)
+                -- เมื่อเข้าถึงระยะทำการ (11 + 15 studs)
                 if dist <= (Config.OverheadDistance + 15) then
-                    -- เริ่มนับเวลาทดสอบดาเมจ (Damage Probe)
                     if not IsProbingDamage then
                         IsProbingDamage = true
                         ProbeStartTime = tick()
                         ProbeStartHP = tHum.Health
                     else
-                        -- ครบ 0.8 วินาทีแล้ว
                         if (tick() - ProbeStartTime) >= Config.DamageTestTime then
                             if tHum.Health >= ProbeStartHP then
-                                -- ตีไม่เข้า (เซฟโซน / ไม่เปิด PvP) -> จำชื่อใส่คิว แล้วสลับไปคนถัดไปทันที
+                                -- ตีไม่เข้า (เซฟโซน/ปิด PvP) -> จำชื่อแล้วข้ามทันที
                                 TriedPlayers[CurrentTarget.UserId] = true
                                 CurrentTarget = nil
                                 IsProbingDamage = false
                             else
-                                -- ตีเข้าปกติ ทำการล่าต่อไปจนกว่าจะตาย
+                                -- ดาเมจเข้า ล่าต่อจนตาย
                                 ProbeStartTime = tick()
                                 ProbeStartHP = tHum.Health
                             end
                         end
                     end
 
-                    -- ทำการโจมตี
                     if CurrentTarget then
                         if tick() - LastWeaponSwitch >= Config.WeaponSwitchDelay then
                             SwitchWeapon()
@@ -323,12 +321,14 @@ task.spawn(function()
                         CastSkills(tHRP, tHum)
                     end
                 else
-                    -- ยังบินไปไม่ถึงตัว ไม่นับเวลา timeout
                     IsProbingDamage = false
                 end
             end
         else
-            RemovePhysicsAnchor()
+            KillFlightController()
+            if Humanoid then
+                Humanoid.PlatformStand = false
+            end
             CurrentTarget = nil
             IsProbingDamage = false
         end
@@ -361,7 +361,7 @@ local function BuildUI()
 
     local Header = Instance.new("TextLabel", Main)
     Header.Size = UDim2.new(1, 0, 0, 36)
-    Header.Text = "BLOXRUITS BOUNTY v73 (12-QUEUE)"
+    Header.Text = "BLOXRUITS BOUNTY v74 (ANTI-RUBBER)"
     Header.TextColor3 = Color3.fromRGB(240, 240, 255)
     Header.Font = Enum.Font.GothamBold
     Header.TextSize = 12
@@ -381,9 +381,10 @@ local function BuildUI()
     Toggle.MouseButton1Click:Connect(function()
         Config.Enabled = not Config.Enabled
         Toggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(45, 160, 95) or Color3.fromRGB(35, 35, 48)
-        Toggle.Text = "AUTO BOUNTY: " .. (Config.Enabled and "HUNTING QUEUE" or "OFF")
+        Toggle.Text = "AUTO BOUNTY: " .. (Config.Enabled and "ONLINE (NO RUBBERBAND)" or "OFF")
         if not Config.Enabled then
-            RemovePhysicsAnchor()
+            KillFlightController()
+            if Humanoid then Humanoid.PlatformStand = false end
             CurrentTarget = nil
             IsProbingDamage = false
         else
@@ -400,7 +401,7 @@ local function BuildUI()
     Status.Font = Enum.Font.Gotham
     Status.TextSize = 12
     Status.TextWrapped = true
-    Status.Text = "Status: Idle"
+    Status.Text = "Status: Standing By"
     local sCorner = Instance.new("UICorner", Status)
     sCorner.CornerRadius = UDim.new(0, 6)
 
@@ -408,15 +409,15 @@ local function BuildUI()
         while ScreenGui.Parent do
             task.wait(0.2)
             if not Config.Enabled then
-                Status.Text = "Mode: IDLE\nRound-Robin 12-Queue: READY\n0.8s Damage Probe: ACTIVE\nDirect Missile Fly: READY"
+                Status.Text = "Mode: IDLE\nAnti-Rubberband Engine: ACTIVE\nVector Fly: 320 Speed\n12-Queue Round-Robin: READY"
             elseif CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") then
                 local hp = math.floor(CurrentTarget.Character.Humanoid.Health)
                 local maxHp = math.floor(CurrentTarget.Character.Humanoid.MaxHealth)
-                local testStatus = IsProbingDamage and "PROBING (0.8s)..." or "ATTACKING"
-                Status.Text = string.format("LOCKED: %s\nHP: %d / %d\nState: %s\nWeapon: %s\nQueue Progress: %d Tested",
-                    CurrentTarget.Name, hp, maxHp, testStatus, Config.Weapons[CurrentWeaponIndex] or "Melee", (function() local c=0; for _ in pairs(TriedPlayers) do c=c+1 end return c end)())
+                local probeTxt = IsProbingDamage and "TESTING DAMAGE (0.8s)" or "ATTACKING"
+                Status.Text = string.format("LOCKED: %s\nHP: %d / %d\nState: %s\nWeapon: %s\nTested In Server: %d Players",
+                    CurrentTarget.Name, hp, maxHp, probeTxt, Config.Weapons[CurrentWeaponIndex] or "Melee", (function() local c=0; for _ in pairs(TriedPlayers) do c=c+1 end return c end)())
             else
-                Status.Text = "Mode: QUEUE SCAN\nGrabbing next player from server queue..."
+                Status.Text = "Mode: SCANNING QUEUE\nAcquiring next valid player..."
             end
         end
     end)
