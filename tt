@@ -1,5 +1,5 @@
--- [[ Blox Fruits Overhead Bounty Hunter v76 ]] --
--- Features: Live Player Telemetry (Level + HP + Distance Meter), Real-Time Radar HUD, Selector Scrollview, Anti-Rubber Vector Flight
+-- [[ Blox Fruits Overhead Bounty Hunter v77 ]] --
+-- Fix: 100% Strict Command Obedience (Manual Override), Bounty-Eligible Filter (No Low Levels/No PvP-Off), Zero-Distraction Hard Lock
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -18,18 +18,18 @@ local Humanoid = Character:WaitForChild("Humanoid")
 -- [[ Master Configuration ]] --
 local Config = {
     Enabled = false,
-    TargetMode = "Auto",     -- "Auto" หรือ "Manual"
+    TargetMode = "Auto",     -- "Manual" (สั่งล็อกตัวไหนไปตัวนั้น 100%) หรือ "Auto" (ล่าเฉพาะคนมีค่าหัว)
     SelectedPlayer = nil,
+    MinBountyLevel = 20,     -- ข้ามพวกเวลต่ำกว่าเกณฑ์ที่ไม่ได้ค่าหัว
     OverheadDistance = 11,
-    FlySpeed = 320,
+    FlySpeed = 350,
     FastAttack = true,
     AutoHaki = true,
     AutoPvP = true,
     SkillSpam = true,
     Skills = {"Z", "X", "C", "V"},
     Weapons = {"Melee", "Sword", "Blox Fruit", "Gun"},
-    WeaponSwitchDelay = 0.6,
-    DamageTestTime = 0.8
+    WeaponSwitchDelay = 0.6
 }
 
 local CurrentTarget = nil
@@ -39,38 +39,30 @@ local ActiveController = nil
 local LastWeaponSwitch = 0
 local CurrentWeaponIndex = 1
 
--- 12-Player Queue & Damage Probe
-local TargetQueue = {}
-local QueueIndex = 1
-local TriedPlayers = {}
-local ProbeStartTime = 0
-local ProbeStartHP = 0
-local IsProbingDamage = false
-
--- [[ Remotes ]] --
+-- Remotes
 local Remotes = ReplicatedStorage:WaitForChild("Remotes", 5)
 local CommF = Remotes and Remotes:WaitForChild("CommF_", 5)
 local NetModule = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Net")
 local RegisterAttack = NetModule and (NetModule:FindFirstChild("RegisterAttack") or NetModule:FindFirstChild("RE/RegisterAttack"))
 local RegisterHit = NetModule and (NetModule:FindFirstChild("RegisterHit") or NetModule:FindFirstChild("RE/RegisterHit"))
 
--- [[ Helper: Get Player Level ]] --
+-- [[ Helper: Level Parser ]] --
 local function GetPlayerLevel(player)
-    if not player then return "?" end
+    if not player then return 0 end
     local data = player:FindFirstChild("Data")
     if data and data:FindFirstChild("Level") then
-        return tostring(data.Level.Value)
+        return tonumber(data.Level.Value) or 0
     end
     local leaderstats = player:FindFirstChild("leaderstats")
     if leaderstats and leaderstats:FindFirstChild("Level") then
-        return tostring(leaderstats.Level.Value)
+        return tonumber(leaderstats.Level.Value) or 0
     end
     local attr = player:GetAttribute("Level")
-    if attr then return tostring(attr) end
-    return "?"
+    if attr then return tonumber(attr) or 0 end
+    return 0
 end
 
--- [[ Helper: Get Player HP & MaxHP ]] --
+-- [[ Helper: HP Parser ]] --
 local function GetPlayerHealth(player)
     if player and player.Character and player.Character:FindFirstChild("Humanoid") then
         local hum = player.Character.Humanoid
@@ -79,12 +71,28 @@ local function GetPlayerHealth(player)
     return 0, 0
 end
 
--- [[ Helper: Get Distance from LocalPlayer ]] --
+-- [[ Helper: Distance Parser ]] --
 local function GetDistanceToPlayer(player)
     if RootPart and player and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
         return math.floor((RootPart.Position - player.Character.HumanoidRootPart.Position).Magnitude)
     end
     return 999999
+end
+
+-- [[ Helper: Check if PvP is Active on Target ]] --
+local function IsPvPActive(player)
+    if not player or not player.Character then return false end
+    local char = player.Character
+    if char:FindFirstChild("PvPDisabled") or player:FindFirstChild("PvPDisabled") then
+        return false
+    end
+    if char:FindFirstChildOfClass("ForceField") then
+        return false
+    end
+    if char:GetAttribute("PvPDisabled") == true or player:GetAttribute("PvPDisabled") == true then
+        return false
+    end
+    return true
 end
 
 -- [[ Anti-Rubberband Flight Controller ]] --
@@ -108,7 +116,7 @@ local function KillFlightController()
     end
 end
 
--- [[ Anti-Desync Heartbeat ]] --
+-- [[ Anti-Desync Noclip ]] --
 RunService.Heartbeat:Connect(function()
     if Config.Enabled and Character and RootPart then
         for _, part in ipairs(Character:GetDescendants()) do
@@ -159,77 +167,38 @@ local function EnsurePvPAndHaki()
     end)
 end
 
--- [[ Nearest Player Info Engine ]] --
-local function GetNearestPlayerInfo()
-    local nearest = nil
-    local minDistance = math.huge
+-- [[ Auto Target Selector: Only Bounty-Eligible & PvP Active ]] --
+local function GetBestBountyTarget()
+    local best = nil
+    local shortestDist = math.huge
+    local myLevel = GetPlayerLevel(LocalPlayer)
 
-    if RootPart then
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") then
-                if p.Character.Humanoid.Health > 0 then
-                    local dist = (RootPart.Position - p.Character.HumanoidRootPart.Position).Magnitude
-                    if dist < minDistance then
-                        minDistance = dist
-                        nearest = p
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") then
+            local hum = p.Character.Humanoid
+            local hrp = p.Character.HumanoidRootPart
+            local pLevel = GetPlayerLevel(p)
+
+            -- เงื่อนไข: เลือด > 0, เปิด PvP, เวลถึงเกณฑ์ที่จะได้ค่าหัว
+            if hum.Health > 0 and IsPvPActive(p) and pLevel >= Config.MinBountyLevel then
+                -- ถ้าเราเวลสูง ตรวจสอบไม่ให้ตีคนเวลต่ำเกินไปที่ไม่ได้ Bounty
+                local isBountyEligible = true
+                if myLevel > 100 and pLevel < (myLevel - 350) and pLevel < 2000 then
+                    isBountyEligible = false
+                end
+
+                if isBountyEligible then
+                    local dist = (RootPart.Position - hrp.Position).Magnitude
+                    if dist < shortestDist then
+                        shortestDist = dist
+                        best = p
                     end
                 end
             end
         end
     end
 
-    return nearest, minDistance
-end
-
--- [[ Queue Management ]] --
-local function RefreshPlayerQueue()
-    TargetQueue = {}
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer then
-            table.insert(TargetQueue, p)
-        end
-    end
-    QueueIndex = 1
-end
-
-local function GetNextTarget()
-    if Config.TargetMode == "Manual" and Config.SelectedPlayer then
-        local p = Config.SelectedPlayer
-        if p and p.Parent and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") and p.Character.Humanoid.Health > 0 then
-            return p
-        else
-            return nil
-        end
-    end
-
-    if #TargetQueue == 0 or QueueIndex > #TargetQueue then
-        RefreshPlayerQueue()
-        TriedPlayers = {}
-    end
-
-    local candidate = nil
-    while QueueIndex <= #TargetQueue do
-        local p = TargetQueue[QueueIndex]
-        QueueIndex = QueueIndex + 1
-
-        if p and p.Parent and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") then
-            if p.Character.Humanoid.Health > 0 and not TriedPlayers[p.UserId] then
-                candidate = p
-                break
-            end
-        end
-    end
-
-    if not candidate then
-        RefreshPlayerQueue()
-        TriedPlayers = {}
-        if #TargetQueue > 0 then
-            candidate = TargetQueue[1]
-            QueueIndex = 2
-        end
-    end
-
-    return candidate
+    return best
 end
 
 -- [[ Weapon Switcher ]] --
@@ -302,7 +271,7 @@ local function CastSkills(targetHRP, targetHum)
     end
 end
 
--- [[ Anti-Rubberband Vector Flight ]] --
+-- [[ Direct Missile Flight Engine ]] --
 local function MoveTowardsTarget(targetHRP)
     InitFlightController()
     
@@ -321,7 +290,7 @@ local function MoveTowardsTarget(targetHRP)
     end
 end
 
--- [[ Master Combat Loop ]] --
+-- [[ Master Combat Loop (Hard Lock & No Distraction) ]] --
 task.spawn(function()
     while true do
         task.wait(0.015)
@@ -329,65 +298,53 @@ task.spawn(function()
         if Config.Enabled then
             EnsurePvPAndHaki()
 
-            if not CurrentTarget 
-                or not CurrentTarget.Parent 
-                or not CurrentTarget.Character 
-                or not CurrentTarget.Character:FindFirstChild("HumanoidRootPart") 
-                or not CurrentTarget.Character:FindFirstChild("Humanoid")
-                or CurrentTarget.Character.Humanoid.Health <= 0 then
-                
-                CurrentTarget = GetNextTarget()
-                IsProbingDamage = false
-                ProbeStartTime = 0
-                ProbeStartHP = 0
+            -- 1. ตรวจสอบเป้าหมายตามโหมด
+            if Config.TargetMode == "Manual" and Config.SelectedPlayer then
+                -- โหมดเลือกเอง: ล็อคเป้าหมายคนนี้ 100% ห้ามเปลี่ยน
+                local p = Config.SelectedPlayer
+                if p and p.Parent and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") and p.Character.Humanoid.Health > 0 then
+                    CurrentTarget = p
+                else
+                    CurrentTarget = nil
+                end
+            else
+                -- โหมด Auto: ล็อคคนที่ได้ค่าหัว จนกว่าจะตาย (ห้ามสลับตัวกลางอากาศ)
+                if not CurrentTarget 
+                    or not CurrentTarget.Parent 
+                    or not CurrentTarget.Character 
+                    or not CurrentTarget.Character:FindFirstChild("HumanoidRootPart") 
+                    or not CurrentTarget.Character:FindFirstChild("Humanoid")
+                    or CurrentTarget.Character.Humanoid.Health <= 0 then
+                    
+                    CurrentTarget = GetBestBountyTarget()
+                end
             end
 
+            -- 2. ดำเนินการพุ่งจุ่มและโจมตีแบบไม่วอกแวก
             if CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
                 local tHRP = CurrentTarget.Character.HumanoidRootPart
                 local tHum = CurrentTarget.Character.Humanoid
 
+                -- บินพุ่งตรงไปหาเป้าหมาย
                 MoveTowardsTarget(tHRP)
 
                 local dist = (RootPart.Position - tHRP.Position).Magnitude
 
+                -- ถึงระยะหัว (11 + 15 studs) -> ฟันรัวๆ + สกิล
                 if dist <= (Config.OverheadDistance + 15) then
-                    if Config.TargetMode == "Auto" then
-                        if not IsProbingDamage then
-                            IsProbingDamage = true
-                            ProbeStartTime = tick()
-                            ProbeStartHP = tHum.Health
-                        else
-                            if (tick() - ProbeStartTime) >= Config.DamageTestTime then
-                                if tHum.Health >= ProbeStartHP then
-                                    TriedPlayers[CurrentTarget.UserId] = true
-                                    CurrentTarget = nil
-                                    IsProbingDamage = false
-                                else
-                                    ProbeStartTime = tick()
-                                    ProbeStartHP = tHum.Health
-                                end
-                            end
-                        end
+                    if tick() - LastWeaponSwitch >= Config.WeaponSwitchDelay then
+                        SwitchWeapon()
+                        LastWeaponSwitch = tick()
                     end
 
-                    if CurrentTarget then
-                        if tick() - LastWeaponSwitch >= Config.WeaponSwitchDelay then
-                            SwitchWeapon()
-                            LastWeaponSwitch = tick()
-                        end
-
-                        ExecuteFastAttack(tHRP)
-                        CastSkills(tHRP, tHum)
-                    end
-                else
-                    IsProbingDamage = false
+                    ExecuteFastAttack(tHRP)
+                    CastSkills(tHRP, tHum)
                 end
             end
         else
             KillFlightController()
             if Humanoid then Humanoid.PlatformStand = false end
             CurrentTarget = nil
-            IsProbingDamage = false
         end
     end
 end)
@@ -416,10 +373,10 @@ local function BuildUI()
     Stroke.Color = Color3.fromRGB(90, 95, 145)
     Stroke.Thickness = 1.5
 
-    -- Title
+    -- Header Title
     local Header = Instance.new("TextLabel", Main)
     Header.Size = UDim2.new(1, 0, 0, 36)
-    Header.Text = "BLOXRUITS BOUNTY v76 (TELEMETRY HUD)"
+    Header.Text = "BLOXRUITS BOUNTY v77 (STRICT LOCK)"
     Header.TextColor3 = Color3.fromRGB(240, 240, 255)
     Header.Font = Enum.Font.GothamBold
     Header.TextSize = 12
@@ -437,7 +394,7 @@ local function BuildUI()
     local tCorner = Instance.new("UICorner", Toggle)
     tCorner.CornerRadius = UDim.new(0, 6)
 
-    -- Mode Switch (Auto / Manual)
+    -- Mode Switch Button
     local ModeBtn = Instance.new("TextButton", Main)
     ModeBtn.Size = UDim2.new(0.92, 0, 0, 30)
     ModeBtn.Position = UDim2.new(0.04, 0, 0, 80)
@@ -445,11 +402,11 @@ local function BuildUI()
     ModeBtn.TextColor3 = Color3.fromRGB(180, 200, 255)
     ModeBtn.Font = Enum.Font.GothamBold
     ModeBtn.TextSize = 11
-    ModeBtn.Text = "TARGET MODE: AUTO (QUEUE)"
+    ModeBtn.Text = "TARGET MODE: AUTO (BOUNTY ONLY)"
     local mCorner = Instance.new("UICorner", ModeBtn)
     mCorner.CornerRadius = UDim.new(0, 6)
 
-    -- Nearest Player Radar
+    -- Nearest Radar HUD
     local NearestRadar = Instance.new("TextLabel", Main)
     NearestRadar.Size = UDim2.new(0.92, 0, 0, 44)
     NearestRadar.Position = UDim2.new(0.04, 0, 0, 114)
@@ -458,7 +415,7 @@ local function BuildUI()
     NearestRadar.Font = Enum.Font.GothamBold
     NearestRadar.TextSize = 11
     NearestRadar.TextWrapped = true
-    NearestRadar.Text = "🎯 Nearest: Scanning server..."
+    NearestRadar.Text = "🎯 Radar: Scanning..."
     local rCorner = Instance.new("UICorner", NearestRadar)
     rCorner.CornerRadius = UDim.new(0, 6)
 
@@ -490,7 +447,6 @@ local function BuildUI()
     local sCorner = Instance.new("UICorner", Status)
     sCorner.CornerRadius = UDim.new(0, 6)
 
-    -- Dynamic Player Telemetry Button Renderer
     local PlayerButtons = {}
 
     local function PopulatePlayerList()
@@ -508,6 +464,7 @@ local function BuildUI()
                 local lvl = GetPlayerLevel(p)
                 local hp, maxHp = GetPlayerHealth(p)
                 local dist = GetDistanceToPlayer(p)
+                local pvpStatus = IsPvPActive(p) and "[PvP: ON]" or "[PvP: OFF]"
 
                 local pBtn = Instance.new("TextButton", PlayerListFrame)
                 pBtn.Size = UDim2.new(0.96, 0, 0, 30)
@@ -516,7 +473,7 @@ local function BuildUI()
                 pBtn.Font = Enum.Font.Gotham
                 pBtn.TextSize = 10
                 pBtn.TextXAlignment = Enum.TextXAlignment.Left
-                pBtn.Text = string.format("  [%s] Lv.%s | HP: %d/%d | %d studs", p.Name, lvl, hp, maxHp, dist)
+                pBtn.Text = string.format("  [%s] Lv.%d %s | HP: %d/%d | %d studs", p.Name, lvl, pvpStatus, hp, maxHp, dist)
 
                 local bCorner = Instance.new("UICorner", pBtn)
                 bCorner.CornerRadius = UDim.new(0, 4)
@@ -524,10 +481,11 @@ local function BuildUI()
                 PlayerButtons[p] = pBtn
 
                 pBtn.MouseButton1Click:Connect(function()
+                    -- ล็อคตัวนี้ทันที 100% ไม่ขัดคำสั่ง
                     Config.SelectedPlayer = p
                     Config.TargetMode = "Manual"
                     ModeBtn.Text = "TARGET MODE: MANUAL (" .. p.Name .. ")"
-                    CurrentTarget = nil
+                    CurrentTarget = p
                     PopulatePlayerList()
                 end)
             end
@@ -557,15 +515,11 @@ local function BuildUI()
     Toggle.MouseButton1Click:Connect(function()
         Config.Enabled = not Config.Enabled
         Toggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(45, 160, 95) or Color3.fromRGB(35, 35, 48)
-        Toggle.Text = "AUTO BOUNTY: " .. (Config.Enabled and "ONLINE (HUNTING)" or "OFF")
+        Toggle.Text = "AUTO BOUNTY: " .. (Config.Enabled and "ONLINE (LOCKED)" or "OFF")
         if not Config.Enabled then
             KillFlightController()
             if Humanoid then Humanoid.PlatformStand = false end
             CurrentTarget = nil
-            IsProbingDamage = false
-        else
-            RefreshPlayerQueue()
-            TriedPlayers = {}
         end
     end)
 
@@ -574,27 +528,29 @@ local function BuildUI()
         if Config.TargetMode == "Auto" then
             Config.TargetMode = "Manual"
             ModeBtn.Text = "TARGET MODE: MANUAL (" .. (Config.SelectedPlayer and Config.SelectedPlayer.Name or "None") .. ")"
+            CurrentTarget = Config.SelectedPlayer
         else
             Config.TargetMode = "Auto"
             Config.SelectedPlayer = nil
-            ModeBtn.Text = "TARGET MODE: AUTO (QUEUE)"
+            ModeBtn.Text = "TARGET MODE: AUTO (BOUNTY ONLY)"
+            CurrentTarget = nil
             PopulatePlayerList()
         end
-        CurrentTarget = nil
     end)
 
-    -- Real-time UI & Telemetry Refresh Loop
+    -- Real-time UI Refresh Loop
     task.spawn(function()
         while ScreenGui.Parent do
             task.wait(0.25)
             
-            -- Real-time Update Player Selector Buttons
+            -- อัปเดตปุ่มในรายการผู้เล่น
             for p, btn in pairs(PlayerButtons) do
                 if p and p.Parent then
                     local lvl = GetPlayerLevel(p)
                     local hp, maxHp = GetPlayerHealth(p)
                     local dist = GetDistanceToPlayer(p)
-                    btn.Text = string.format("  [%s] Lv.%s | HP: %d/%d | %d studs", p.Name, lvl, hp, maxHp, dist)
+                    local pvpStatus = IsPvPActive(p) and "[PvP: ON]" or "[PvP: OFF]"
+                    btn.Text = string.format("  [%s] Lv.%d %s | HP: %d/%d | %d studs", p.Name, lvl, pvpStatus, hp, maxHp, dist)
                     if Config.SelectedPlayer == p then
                         btn.BackgroundColor3 = Color3.fromRGB(50, 130, 80)
                     else
@@ -603,28 +559,42 @@ local function BuildUI()
                 end
             end
 
-            -- Update Nearest Player Radar
-            local nearestP, dist = GetNearestPlayerInfo()
+            -- ค้นหาคนที่ใกล้ที่สุดที่เปิด PvP
+            local nearestP = nil
+            local minD = math.huge
+            if RootPart then
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") then
+                        if p.Character.Humanoid.Health > 0 and IsPvPActive(p) then
+                            local d = (RootPart.Position - p.Character.HumanoidRootPart.Position).Magnitude
+                            if d < minD then
+                                minD = d
+                                nearestP = p
+                            end
+                        end
+                    end
+                end
+            end
+
             if nearestP and nearestP.Character and nearestP.Character:FindFirstChild("Humanoid") then
                 local lvl = GetPlayerLevel(nearestP)
                 local hp, maxHp = GetPlayerHealth(nearestP)
-                NearestRadar.Text = string.format("🎯 NEAREST: %s (Lv.%s)\nHP: %d / %d | Distance: %d studs", nearestP.Name, lvl, hp, maxHp, math.floor(dist))
+                NearestRadar.Text = string.format("🎯 NEAREST (PvP ON): %s (Lv.%d)\nHP: %d / %d | Distance: %d studs", nearestP.Name, lvl, hp, maxHp, math.floor(minD))
             else
-                NearestRadar.Text = "🎯 NEAREST: No valid targets detected"
+                NearestRadar.Text = "🎯 NEAREST (PvP ON): No PvP-enabled players nearby"
             end
 
-            -- Update Current Locked Status
+            -- กล่องบอกสถานะเป้าหมายที่ล็อค
             if not Config.Enabled then
-                Status.Text = string.format("Mode: IDLE | Selection: %s\nTelemetry HUD: ACTIVE\nAnti-Rubber Flight Speed: %d", Config.TargetMode, Config.FlySpeed)
+                Status.Text = string.format("Mode: IDLE | Selection: %s\nHard Lock: READY\nClick any player to commit 100%% attack.", Config.TargetMode)
             elseif CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") then
                 local lvl = GetPlayerLevel(CurrentTarget)
                 local hp, maxHp = GetPlayerHealth(CurrentTarget)
                 local dist = GetDistanceToPlayer(CurrentTarget)
-                local probeTxt = IsProbingDamage and "TESTING DAMAGE (0.8s)" or "ATTACKING"
-                Status.Text = string.format("LOCKED: %s (Lv.%s) | Dist: %d studs\nHP: %d / %d | State: %s\nWeapon: %s | Mode: %s",
-                    CurrentTarget.Name, lvl, dist, hp, maxHp, probeTxt, Config.Weapons[CurrentWeaponIndex] or "Melee", Config.TargetMode)
+                Status.Text = string.format("HARD LOCKED: %s (Lv.%d) | Dist: %d studs\nHP: %d / %d | Mode: %s\nAction: DIVE & STRIKE (NO DISTRACTION)",
+                    CurrentTarget.Name, lvl, dist, hp, maxHp, Config.TargetMode)
             else
-                Status.Text = "Mode: ACQUIRING TARGET\nFinding next valid candidate in server..."
+                Status.Text = "Mode: ACQUIRING TARGET\nSearching eligible bounty targets (PvP ON)..."
             end
         end
     end)
