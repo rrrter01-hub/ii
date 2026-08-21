@@ -1,5 +1,5 @@
--- [[ Blox Fruits Overhead Bounty Hunter v74 ]] --
--- Fix: Complete Anti-Rubberband / Desync Fix (Pure Linear Velocity Flight, State Disabler, 12-Queue Fast Hunter)
+-- [[ Blox Fruits Overhead Bounty Hunter v75 ]] --
+-- Features: Manual Player Selector (Dropdown/List), Real-time Nearest Player Radar, Anti-Rubberband Vector Flight, Auto PvP/Haki, M1 + Skill Aim
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -18,8 +18,10 @@ local Humanoid = Character:WaitForChild("Humanoid")
 -- [[ Master Configuration ]] --
 local Config = {
     Enabled = false,
+    TargetMode = "Auto",     -- "Auto" (ใกล้สุด/คิว) หรือ "Manual" (เลือกเอง)
+    SelectedPlayer = nil,    -- ผู้เล่นที่เลือกเจาะจง
     OverheadDistance = 11,
-    FlySpeed = 320,          -- ความเร็วการบินที่เสถียร ไม่โดน Server Rollback
+    FlySpeed = 320,
     FastAttack = true,
     AutoHaki = true,
     AutoPvP = true,
@@ -27,7 +29,7 @@ local Config = {
     Skills = {"Z", "X", "C", "V"},
     Weapons = {"Melee", "Sword", "Blox Fruit", "Gun"},
     WeaponSwitchDelay = 0.6,
-    DamageTestTime = 0.8     -- ทดสอบดาเมจ 0.8 วินาที
+    DamageTestTime = 0.8
 }
 
 local CurrentTarget = nil
@@ -37,7 +39,7 @@ local ActiveController = nil
 local LastWeaponSwitch = 0
 local CurrentWeaponIndex = 1
 
--- 12-Player Round-Robin Queue
+-- 12-Player Queue & Damage Probe
 local TargetQueue = {}
 local QueueIndex = 1
 local TriedPlayers = {}
@@ -73,10 +75,9 @@ local function KillFlightController()
     end
 end
 
--- [[ Anti-Desync Collision & Physics Stabilizer ]] --
+-- [[ Anti-Desync Noclip & Stabilizer ]] --
 RunService.Heartbeat:Connect(function()
     if Config.Enabled and Character and RootPart then
-        -- ป้องกันการชนและอาการกระตุกถอยหลัง (Rubberbanding)
         for _, part in ipairs(Character:GetDescendants()) do
             if part:IsA("BasePart") then
                 part.CanCollide = false
@@ -125,7 +126,29 @@ local function EnsurePvPAndHaki()
     end)
 end
 
--- [[ 12-Player Queue Management ]] --
+-- [[ Real-time Nearest Player Scanner ]] --
+local function GetNearestPlayerInfo()
+    local nearest = nil
+    local minDistance = math.huge
+
+    if RootPart then
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") then
+                if p.Character.Humanoid.Health > 0 then
+                    local dist = (RootPart.Position - p.Character.HumanoidRootPart.Position).Magnitude
+                    if dist < minDistance then
+                        minDistance = dist
+                        nearest = p
+                    end
+                end
+            end
+        end
+    end
+
+    return nearest, minDistance
+end
+
+-- [[ Queue & Target Logic ]] --
 local function RefreshPlayerQueue()
     TargetQueue = {}
     for _, p in ipairs(Players:GetPlayers()) do
@@ -137,6 +160,16 @@ local function RefreshPlayerQueue()
 end
 
 local function GetNextTarget()
+    if Config.TargetMode == "Manual" and Config.SelectedPlayer then
+        local p = Config.SelectedPlayer
+        if p and p.Parent and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") and p.Character.Humanoid.Health > 0 then
+            return p
+        else
+            return nil
+        end
+    end
+
+    -- Auto Queue Mode
     if #TargetQueue == 0 or QueueIndex > #TargetQueue then
         RefreshPlayerQueue()
         TriedPlayers = {}
@@ -237,7 +270,7 @@ local function CastSkills(targetHRP, targetHum)
     end
 end
 
--- [[ Smooth Vector-Based Flight (No Teleport Lag, No Rubberbanding) ]] --
+-- [[ Anti-Rubberband Vector Flight ]] --
 local function MoveTowardsTarget(targetHRP)
     InitFlightController()
     
@@ -246,20 +279,17 @@ local function MoveTowardsTarget(targetHRP)
     local delta = (targetPos - curPos)
     local dist = delta.Magnitude
 
-    -- หมุนตัวเล็งลงหาหัวเป้าหมายตลอดเวลา
     RootPart.CFrame = CFrame.new(curPos, targetHRP.Position) * CFrame.Angles(math.rad(-90), 0, 0)
 
     if dist > 8 then
-        -- บินด้วยความเร็วเวกเตอร์สม่ำเสมอ ป้องกันเซิร์ฟเวอร์ดึงกลับ
         FlightVelocity.Velocity = delta.Unit * Config.FlySpeed
     else
-        -- เข้าจุด overhead แล้วหยุดนิ่งบนหัวทันที
         FlightVelocity.Velocity = Vector3.new(0, 0, 0)
         RootPart.CFrame = CFrame.new(targetPos, targetHRP.Position) * CFrame.Angles(math.rad(-90), 0, 0)
     end
 end
 
--- [[ Master Combat & Queue Loop ]] --
+-- [[ Master Combat Loop ]] --
 task.spawn(function()
     while true do
         task.wait(0.015)
@@ -267,7 +297,6 @@ task.spawn(function()
         if Config.Enabled then
             EnsurePvPAndHaki()
 
-            -- ตรวจสอบเป้าหมายปัจจุบัน
             if not CurrentTarget 
                 or not CurrentTarget.Parent 
                 or not CurrentTarget.Character 
@@ -285,28 +314,27 @@ task.spawn(function()
                 local tHRP = CurrentTarget.Character.HumanoidRootPart
                 local tHum = CurrentTarget.Character.Humanoid
 
-                -- เคลื่อนที่ไปหาเป้าหมายแบบ Smooth Vector
                 MoveTowardsTarget(tHRP)
 
                 local dist = (RootPart.Position - tHRP.Position).Magnitude
 
-                -- เมื่อเข้าถึงระยะทำการ (11 + 15 studs)
                 if dist <= (Config.OverheadDistance + 15) then
-                    if not IsProbingDamage then
-                        IsProbingDamage = true
-                        ProbeStartTime = tick()
-                        ProbeStartHP = tHum.Health
-                    else
-                        if (tick() - ProbeStartTime) >= Config.DamageTestTime then
-                            if tHum.Health >= ProbeStartHP then
-                                -- ตีไม่เข้า (เซฟโซน/ปิด PvP) -> จำชื่อแล้วข้ามทันที
-                                TriedPlayers[CurrentTarget.UserId] = true
-                                CurrentTarget = nil
-                                IsProbingDamage = false
-                            else
-                                -- ดาเมจเข้า ล่าต่อจนตาย
-                                ProbeStartTime = tick()
-                                ProbeStartHP = tHum.Health
+                    -- Probe เฉพาะโหมด Auto
+                    if Config.TargetMode == "Auto" then
+                        if not IsProbingDamage then
+                            IsProbingDamage = true
+                            ProbeStartTime = tick()
+                            ProbeStartHP = tHum.Health
+                        else
+                            if (tick() - ProbeStartTime) >= Config.DamageTestTime then
+                                if tHum.Health >= ProbeStartHP then
+                                    TriedPlayers[CurrentTarget.UserId] = true
+                                    CurrentTarget = nil
+                                    IsProbingDamage = false
+                                else
+                                    ProbeStartTime = tick()
+                                    ProbeStartHP = tHum.Health
+                                end
                             end
                         end
                     end
@@ -326,16 +354,14 @@ task.spawn(function()
             end
         else
             KillFlightController()
-            if Humanoid then
-                Humanoid.PlatformStand = false
-            end
+            if Humanoid then Humanoid.PlatformStand = false end
             CurrentTarget = nil
             IsProbingDamage = false
         end
     end
 end)
 
--- [[ Minimalistic UI ]] --
+-- [[ UI & Player Selector Interface ]] --
 local function BuildUI()
     local ScreenGui = Instance.new("ScreenGui")
     ScreenGui.Name = "OnyxOverheadHub"
@@ -345,8 +371,8 @@ local function BuildUI()
     ScreenGui.Parent = success and coreGui or LocalPlayer:WaitForChild("PlayerGui")
 
     local Main = Instance.new("Frame", ScreenGui)
-    Main.Size = UDim2.new(0, 310, 0, 260)
-    Main.Position = UDim2.new(0.5, -155, 0.25, 0)
+    Main.Size = UDim2.new(0, 340, 0, 420)
+    Main.Position = UDim2.new(0.5, -170, 0.2, 0)
     Main.BackgroundColor3 = Color3.fromRGB(12, 12, 16)
     Main.BorderSizePixel = 0
     Main.Active = true
@@ -356,32 +382,141 @@ local function BuildUI()
     Corner.CornerRadius = UDim.new(0, 8)
 
     local Stroke = Instance.new("UIStroke", Main)
-    Stroke.Color = Color3.fromRGB(85, 90, 135)
+    Stroke.Color = Color3.fromRGB(85, 90, 140)
     Stroke.Thickness = 1.5
 
+    -- Title
     local Header = Instance.new("TextLabel", Main)
     Header.Size = UDim2.new(1, 0, 0, 36)
-    Header.Text = "BLOXRUITS BOUNTY v74 (ANTI-RUBBER)"
+    Header.Text = "BLOXRUITS BOUNTY v75 (PLAYER SELECT)"
     Header.TextColor3 = Color3.fromRGB(240, 240, 255)
     Header.Font = Enum.Font.GothamBold
     Header.TextSize = 12
     Header.BackgroundTransparency = 1
 
+    -- Main Toggle
     local Toggle = Instance.new("TextButton", Main)
-    Toggle.Size = UDim2.new(0.9, 0, 0, 44)
-    Toggle.Position = UDim2.new(0.05, 0, 0, 44)
+    Toggle.Size = UDim2.new(0.9, 0, 0, 38)
+    Toggle.Position = UDim2.new(0.05, 0, 0, 40)
     Toggle.BackgroundColor3 = Color3.fromRGB(35, 35, 48)
     Toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
     Toggle.Font = Enum.Font.GothamBold
-    Toggle.TextSize = 13
+    Toggle.TextSize = 12
     Toggle.Text = "AUTO BOUNTY: OFF"
     local tCorner = Instance.new("UICorner", Toggle)
     tCorner.CornerRadius = UDim.new(0, 6)
 
+    -- Mode Switch (Auto / Manual)
+    local ModeBtn = Instance.new("TextButton", Main)
+    ModeBtn.Size = UDim2.new(0.9, 0, 0, 32)
+    ModeBtn.Position = UDim2.new(0.05, 0, 0, 84)
+    ModeBtn.BackgroundColor3 = Color3.fromRGB(28, 28, 38)
+    ModeBtn.TextColor3 = Color3.fromRGB(180, 200, 255)
+    ModeBtn.Font = Enum.Font.GothamBold
+    ModeBtn.TextSize = 11
+    ModeBtn.Text = "TARGET MODE: AUTO (QUEUE)"
+    local mCorner = Instance.new("UICorner", ModeBtn)
+    mCorner.CornerRadius = UDim.new(0, 6)
+
+    -- Nearest Player Radar Banner
+    local NearestRadar = Instance.new("TextLabel", Main)
+    NearestRadar.Size = UDim2.new(0.9, 0, 0, 34)
+    NearestRadar.Position = UDim2.new(0.05, 0, 0, 122)
+    NearestRadar.BackgroundColor3 = Color3.fromRGB(20, 24, 34)
+    NearestRadar.TextColor3 = Color3.fromRGB(120, 230, 160)
+    NearestRadar.Font = Enum.Font.GothamBold
+    NearestRadar.TextSize = 11
+    NearestRadar.Text = "Nearest: Scanning..."
+    local rCorner = Instance.new("UICorner", NearestRadar)
+    rCorner.CornerRadius = UDim.new(0, 6)
+
+    -- Scrollable Player Selector Frame
+    local PlayerListFrame = Instance.new("ScrollingFrame", Main)
+    PlayerListFrame.Size = UDim2.new(0.9, 0, 0, 110)
+    PlayerListFrame.Position = UDim2.new(0.05, 0, 0, 162)
+    PlayerListFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+    PlayerListFrame.BorderSizePixel = 0
+    PlayerListFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+    PlayerListFrame.ScrollBarThickness = 4
+    local pCorner = Instance.new("UICorner", PlayerListFrame)
+    pCorner.CornerRadius = UDim.new(0, 6)
+
+    local UIListLayout = Instance.new("UIListLayout", PlayerListFrame)
+    UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    UIListLayout.Padding = UDim.new(0, 4)
+
+    -- Status Monitor
+    local Status = Instance.new("TextLabel", Main)
+    Status.Size = UDim2.new(0.9, 0, 0, 68)
+    Status.Position = UDim2.new(0.05, 0, 0, 278)
+    Status.BackgroundColor3 = Color3.fromRGB(16, 16, 22)
+    Status.TextColor3 = Color3.fromRGB(200, 220, 255)
+    Status.Font = Enum.Font.Gotham
+    Status.TextSize = 11
+    Status.TextWrapped = true
+    Status.Text = "Status: Standing By"
+    local sCorner = Instance.new("UICorner", Status)
+    sCorner.CornerRadius = UDim.new(0, 6)
+
+    -- Refresh Player Selector Buttons
+    local function PopulatePlayerList()
+        for _, child in ipairs(PlayerListFrame:GetChildren()) do
+            if child:IsA("TextButton") then
+                child:Destroy()
+            end
+        end
+
+        local count = 0
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then
+                count = count + 1
+                local pBtn = Instance.new("TextButton", PlayerListFrame)
+                pBtn.Size = UDim2.new(0.96, 0, 0, 24)
+                pBtn.BackgroundColor3 = (Config.SelectedPlayer == p) and Color3.fromRGB(60, 130, 80) or Color3.fromRGB(30, 30, 42)
+                pBtn.TextColor3 = Color3.fromRGB(240, 240, 255)
+                pBtn.Font = Enum.Font.Gotham
+                pBtn.TextSize = 11
+                pBtn.Text = "  " .. p.DisplayName .. " (@" .. p.Name .. ")"
+                pBtn.TextXAlignment = Enum.TextXAlignment.Left
+
+                local bCorner = Instance.new("UICorner", pBtn)
+                bCorner.CornerRadius = UDim.new(0, 4)
+
+                pBtn.MouseButton1Click:Connect(function()
+                    Config.SelectedPlayer = p
+                    Config.TargetMode = "Manual"
+                    ModeBtn.Text = "TARGET MODE: MANUAL (" .. p.Name .. ")"
+                    CurrentTarget = nil
+                    PopulatePlayerList()
+                end)
+            end
+        end
+        PlayerListFrame.CanvasSize = UDim2.new(0, 0, 0, count * 28)
+    end
+
+    PopulatePlayerList()
+    Players.PlayerAdded:Connect(PopulatePlayerList)
+    Players.PlayerRemoving:Connect(PopulatePlayerList)
+
+    -- Refresh List Button
+    local RefreshBtn = Instance.new("TextButton", Main)
+    RefreshBtn.Size = UDim2.new(0.9, 0, 0, 26)
+    RefreshBtn.Position = UDim2.new(0.05, 0, 0, 352)
+    RefreshBtn.BackgroundColor3 = Color3.fromRGB(30, 32, 45)
+    RefreshBtn.TextColor3 = Color3.fromRGB(180, 200, 255)
+    RefreshBtn.Font = Enum.Font.GothamBold
+    RefreshBtn.TextSize = 11
+    RefreshBtn.Text = "🔄 REFRESH PLAYER LIST"
+    local rfCorner = Instance.new("UICorner", RefreshBtn)
+    rfCorner.CornerRadius = UDim.new(0, 6)
+
+    RefreshBtn.MouseButton1Click:Connect(PopulatePlayerList)
+
+    -- Toggle Button Event
     Toggle.MouseButton1Click:Connect(function()
         Config.Enabled = not Config.Enabled
         Toggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(45, 160, 95) or Color3.fromRGB(35, 35, 48)
-        Toggle.Text = "AUTO BOUNTY: " .. (Config.Enabled and "ONLINE (NO RUBBERBAND)" or "OFF")
+        Toggle.Text = "AUTO BOUNTY: " .. (Config.Enabled and "ONLINE (HUNTING)" or "OFF")
         if not Config.Enabled then
             KillFlightController()
             if Humanoid then Humanoid.PlatformStand = false end
@@ -393,31 +528,45 @@ local function BuildUI()
         end
     end)
 
-    local Status = Instance.new("TextLabel", Main)
-    Status.Size = UDim2.new(0.9, 0, 0, 140)
-    Status.Position = UDim2.new(0.05, 0, 0, 98)
-    Status.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
-    Status.TextColor3 = Color3.fromRGB(200, 220, 255)
-    Status.Font = Enum.Font.Gotham
-    Status.TextSize = 12
-    Status.TextWrapped = true
-    Status.Text = "Status: Standing By"
-    local sCorner = Instance.new("UICorner", Status)
-    sCorner.CornerRadius = UDim.new(0, 6)
+    -- Mode Switch Button Event
+    ModeBtn.MouseButton1Click:Connect(function()
+        if Config.TargetMode == "Auto" then
+            Config.TargetMode = "Manual"
+            ModeBtn.Text = "TARGET MODE: MANUAL (" .. (Config.SelectedPlayer and Config.SelectedPlayer.Name or "None") .. ")"
+        else
+            Config.TargetMode = "Auto"
+            Config.SelectedPlayer = nil
+            ModeBtn.Text = "TARGET MODE: AUTO (QUEUE)"
+            PopulatePlayerList()
+        end
+        CurrentTarget = nil
+    end)
 
+    -- Background UI Monitor Loop
     task.spawn(function()
         while ScreenGui.Parent do
-            task.wait(0.2)
+            task.wait(0.25)
+            
+            -- Update Nearest Player Radar
+            local nearestP, dist = GetNearestPlayerInfo()
+            if nearestP and nearestP.Character and nearestP.Character:FindFirstChild("Humanoid") then
+                local hp = math.floor(nearestP.Character.Humanoid.Health)
+                NearestRadar.Text = string.format("🎯 Nearest: %s (%d studs | HP: %d)", nearestP.Name, math.floor(dist), hp)
+            else
+                NearestRadar.Text = "🎯 Nearest: No players in sight"
+            end
+
+            -- Update Status Box
             if not Config.Enabled then
-                Status.Text = "Mode: IDLE\nAnti-Rubberband Engine: ACTIVE\nVector Fly: 320 Speed\n12-Queue Round-Robin: READY"
+                Status.Text = string.format("Mode: IDLE | Selection: %s\nAnti-Rubber Flight: READY\nClick player in list to lock manually.", Config.TargetMode)
             elseif CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") then
                 local hp = math.floor(CurrentTarget.Character.Humanoid.Health)
                 local maxHp = math.floor(CurrentTarget.Character.Humanoid.MaxHealth)
                 local probeTxt = IsProbingDamage and "TESTING DAMAGE (0.8s)" or "ATTACKING"
-                Status.Text = string.format("LOCKED: %s\nHP: %d / %d\nState: %s\nWeapon: %s\nTested In Server: %d Players",
-                    CurrentTarget.Name, hp, maxHp, probeTxt, Config.Weapons[CurrentWeaponIndex] or "Melee", (function() local c=0; for _ in pairs(TriedPlayers) do c=c+1 end return c end)())
+                Status.Text = string.format("LOCKED: %s | Mode: %s\nHP: %d/%d | State: %s\nWeapon: %s",
+                    CurrentTarget.Name, Config.TargetMode, hp, maxHp, probeTxt, Config.Weapons[CurrentWeaponIndex] or "Melee")
             else
-                Status.Text = "Mode: SCANNING QUEUE\nAcquiring next valid player..."
+                Status.Text = "Mode: ACQUIRING TARGET\nFinding next valid target..."
             end
         end
     end)
