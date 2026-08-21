@@ -1,10 +1,9 @@
--- [[ Blox Fruits Overhead Bounty Hunter v79 ]] --
--- Engine: Safe-Segmented Tween, Relentless Kill-Until-Dead, PvP/SafeZone Blacklist, Auto Haki/PvP, Full Telemetry
+-- [[ Blox Fruits Overhead Bounty Hunter v80 ]] --
+-- Fix: Fixed Continuous BodyVelocity Glide (Zero Rollback/Zero Reset), Relentless Target Execution, Full Telemetry HUD
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
 local VirtualUser = game:GetService("VirtualUser")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -22,8 +21,8 @@ local Config = {
     TargetMode = "Auto",     -- "Auto" (เน้นเกาะใกล้/มีค่าหัว) หรือ "Manual" (เลือกเอง 100%)
     SelectedPlayer = nil,
     MinBountyLevel = 20,
-    OverheadDistance = 11,   -- ระยะลอยเหนือหัวเป้าหมาย (studs)
-    TweenSpeed = 350,        -- ความเร็ว Tween ที่เสถียรที่สุด ไม่โดนเซิร์ฟเวอร์ดึงกลับ
+    OverheadDistance = 11,   -- ระยะลอยเหนือหัว (studs)
+    FlySpeed = 320,          -- ความเร็วบินที่เสถียรที่สุดใน Blox Fruits
     FastAttack = true,
     AutoHaki = true,
     AutoPvP = true,
@@ -31,12 +30,13 @@ local Config = {
     Skills = {"Z", "X", "C", "V"},
     Weapons = {"Melee", "Sword", "Blox Fruit", "Gun"},
     WeaponSwitchDelay = 0.5,
-    DamageTestTime = 0.8,    -- เวลาทดสอบดาเมจ ถ้า 0.8 วิเลือดไม่ลด = ข้ามทันที
-    BlacklistTime = 90       -- แบนเป้าหมายที่ตีไม่เข้า 90 วินาที
+    DamageTestTime = 0.8,
+    BlacklistTime = 90
 }
 
 local CurrentTarget = nil
-local CurrentTween = nil
+local FlightBodyVelocity = nil
+local FlightBodyGyro = nil
 local CombatFramework = nil
 local ActiveController = nil
 local LastWeaponSwitch = 0
@@ -58,7 +58,7 @@ local NetModule = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStor
 local RegisterAttack = NetModule and (NetModule:FindFirstChild("RegisterAttack") or NetModule:FindFirstChild("RE/RegisterAttack"))
 local RegisterHit = NetModule and (NetModule:FindFirstChild("RegisterHit") or NetModule:FindFirstChild("RE/RegisterHit"))
 
--- [[ Helper: Level & Telemetry ]] --
+-- [[ Helper: Telemetry ]] --
 local function GetPlayerLevel(player)
     if not player then return 0 end
     local data = player:FindFirstChild("Data")
@@ -98,7 +98,47 @@ local function IsPvPActive(player)
     return true
 end
 
--- [[ Anti-Desync Noclip & Anti-Gravity ]] --
+-- [[ Anti-Rollback Flight Engine ]] --
+local function SetupFlightPhysics()
+    if not RootPart then return end
+    
+    if not FlightBodyVelocity or FlightBodyVelocity.Parent ~= RootPart then
+        if FlightBodyVelocity then FlightBodyVelocity:Destroy() end
+        FlightBodyVelocity = Instance.new("BodyVelocity")
+        FlightBodyVelocity.Name = "OnyxVelocityGlide"
+        FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+        FlightBodyVelocity.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+        FlightBodyVelocity.P = 15000
+        FlightBodyVelocity.Parent = RootPart
+    end
+
+    if not FlightBodyGyro or FlightBodyGyro.Parent ~= RootPart then
+        if FlightBodyGyro then FlightBodyGyro:Destroy() end
+        FlightBodyGyro = Instance.new("BodyGyro")
+        FlightBodyGyro.Name = "OnyxGyro"
+        FlightBodyGyro.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+        FlightBodyGyro.P = 15000
+        FlightBodyGyro.D = 500
+        FlightBodyGyro.CFrame = RootPart.CFrame
+        FlightBodyGyro.Parent = RootPart
+    end
+end
+
+local function ClearFlightPhysics()
+    if FlightBodyVelocity then
+        FlightBodyVelocity:Destroy()
+        FlightBodyVelocity = nil
+    end
+    if FlightBodyGyro then
+        FlightBodyGyro:Destroy()
+        FlightBodyGyro = nil
+    end
+    if Humanoid then
+        Humanoid.PlatformStand = false
+    end
+end
+
+-- [[ Anti-Collide & Physics Stabilizer ]] --
 RunService.Stepped:Connect(function()
     if Config.Enabled and Character and RootPart then
         for _, part in ipairs(Character:GetDescendants()) do
@@ -106,8 +146,9 @@ RunService.Stepped:Connect(function()
                 part.CanCollide = false
             end
         end
-        RootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        RootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        if Humanoid then
+            Humanoid.PlatformStand = true
+        end
     end
 end)
 
@@ -116,6 +157,7 @@ LocalPlayer.CharacterAdded:Connect(function(char)
     RootPart = char:WaitForChild("HumanoidRootPart")
     Humanoid = char:WaitForChild("Humanoid")
     task.wait(0.3)
+    SetupFlightPhysics()
     SetupCombatHooks()
 end)
 
@@ -147,7 +189,7 @@ local function EnsurePvPAndHaki()
     end)
 end
 
--- [[ Target Filter: Same Island & Proximity First ]] --
+-- [[ Target Selector: Proximity & Bounty First ]] --
 local function AcquireBestTarget()
     local best = nil
     local shortestDist = math.huge
@@ -159,7 +201,6 @@ local function AcquireBestTarget()
             local hrp = p.Character.HumanoidRootPart
             local pLevel = GetPlayerLevel(p)
 
-            -- ตรวจสอบว่าไม่อยู่ใน Blacklist
             local isBlacklisted = false
             if BlacklistedTargets[p] then
                 if tick() < BlacklistedTargets[p] then
@@ -187,34 +228,6 @@ local function AcquireBestTarget()
     end
 
     return best
-end
-
--- [[ Safe-Segmented Tween Engine ]] --
-local function StopCurrentTween()
-    if CurrentTween then
-        CurrentTween:Cancel()
-        CurrentTween = nil
-    end
-end
-
-local function TweenToTarget(targetHRP)
-    local targetPos = targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0)
-    local targetCF = CFrame.new(targetPos, targetHRP.Position) * CFrame.Angles(math.rad(-90), 0, 0)
-    local dist = (RootPart.Position - targetPos).Magnitude
-
-    if dist <= 14 then
-        -- อยู่ในระยะหัวแล้ว ล็อคพิกัดทันที
-        StopCurrentTween()
-        RootPart.CFrame = targetCF
-    else
-        -- คำนวณเวลาการบินตามระยะทางจริง (ความเร็วคงที่ ไม่โดนแอนตี้ชีต)
-        local travelTime = dist / Config.TweenSpeed
-        StopCurrentTween()
-
-        local tweenInfo = TweenInfo.new(travelTime, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
-        CurrentTween = TweenService:Create(RootPart, tweenInfo, {CFrame = targetCF})
-        CurrentTween:Play()
-    end
 end
 
 -- [[ Weapon Switcher ]] --
@@ -287,7 +300,30 @@ local function CastSkills(targetHRP, targetHum)
     end
 end
 
--- [[ Master Relentless Combat Loop ]] --
+-- [[ True Continuous Velocity Glide ]] --
+local function GlideToTarget(targetHRP)
+    SetupFlightPhysics()
+    if not FlightBodyVelocity or not FlightBodyGyro then return end
+
+    local targetOverheadPos = targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0)
+    local curPos = RootPart.Position
+    local delta = (targetOverheadPos - curPos)
+    local dist = delta.Magnitude
+
+    -- เล็งทิศทางปักหัวหาเป้าหมาย
+    FlightBodyGyro.CFrame = CFrame.new(curPos, targetHRP.Position) * CFrame.Angles(math.rad(-90), 0, 0)
+
+    if dist > 10 then
+        -- บินพุ่งตรงด้วยความเร็วคงที่ ไม่กระตุก ไม่เด้งกลับ
+        FlightBodyVelocity.Velocity = delta.Unit * Config.FlySpeed
+    else
+        -- ถึงจุดเหนือหัวแล้ว ล็อคความเร็วเป็น 0 ทันที
+        FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+        RootPart.CFrame = CFrame.new(targetOverheadPos, targetHRP.Position) * CFrame.Angles(math.rad(-90), 0, 0)
+    end
+end
+
+-- [[ Master Combat Loop ]] --
 task.spawn(function()
     while true do
         task.wait(0.015)
@@ -295,7 +331,7 @@ task.spawn(function()
         if Config.Enabled then
             EnsurePvPAndHaki()
 
-            -- 1. ตรวจสอบเป้าหมายปัจจุบัน
+            -- ตรวจสอบเป้าหมายตามโหมด
             if Config.TargetMode == "Manual" and Config.SelectedPlayer then
                 local p = Config.SelectedPlayer
                 if p and p.Parent and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") and p.Character.Humanoid.Health > 0 then
@@ -304,7 +340,6 @@ task.spawn(function()
                     CurrentTarget = nil
                 end
             else
-                -- Auto Mode: ล็อคเป้าหมายจนกว่าจะตายจริง (ห้ามสลับตัวไปมา)
                 if not CurrentTarget 
                     or not CurrentTarget.Parent 
                     or not CurrentTarget.Character 
@@ -320,38 +355,36 @@ task.spawn(function()
                 end
             end
 
-            -- 2. เข้าประชิดและทำการประหาร
+            -- นำตัวละครพุ่งเข้าโจมตี
             if CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
                 local tHRP = CurrentTarget.Character.HumanoidRootPart
                 local tHum = CurrentTarget.Character.Humanoid
 
                 if tHum.Health > 0 then
-                    -- บิน Tween เข้าหัวเป้าหมาย
-                    TweenToTarget(tHRP)
+                    -- บินตรงหาหัวเป้าหมายแบบ Continuous Physics
+                    GlideToTarget(tHRP)
 
                     local dist = (RootPart.Position - tHRP.Position).Magnitude
 
                     -- เมื่อเข้าถึงระยะทำการ (<= 25 studs)
                     if dist <= 25 then
-                        -- ตรวจสอบดาเมจ (Damage Probe)
                         if CombatTracker.Player ~= CurrentTarget or CombatTracker.EngagedTime == 0 then
                             CombatTracker.Player = CurrentTarget
                             CombatTracker.EngagedTime = tick()
                             CombatTracker.InitialHP = tHum.Health
                             CombatTracker.HasDealtDamage = false
                         else
-                            -- ถ้าเลือดลดลง = ดาเมจเข้า! ให้ล็อคซัดต่อจนตาย
+                            -- ตรวจสอบว่าดาเมจเข้าหรือไม่
                             if tHum.Health < CombatTracker.InitialHP then
                                 CombatTracker.HasDealtDamage = true
                                 CombatTracker.InitialHP = tHum.Health
                                 CombatTracker.EngagedTime = tick()
                             elseif not CombatTracker.HasDealtDamage then
-                                -- ถ้าครบ 0.8 วิ แล้วเลือดยังไม่ลดแม้แต่นิดเดียว (ติด Safezone/ปิด PvP)
                                 if (tick() - CombatTracker.EngagedTime) >= Config.DamageTestTime then
+                                    -- ตีไม่เข้าเลย (เซฟโซน/ปิด PvP) -> แบนแล้วเปลี่ยนตัวทันที
                                     BlacklistedTargets[CurrentTarget] = tick() + Config.BlacklistTime
                                     CurrentTarget = nil
                                     CombatTracker.EngagedTime = 0
-                                    StopCurrentTween()
                                 end
                             end
                         end
@@ -367,13 +400,11 @@ task.spawn(function()
                         end
                     end
                 else
-                    -- เป้าหมายตายสนิทแล้ว -> รีเซ็ตหาคนถัดไป
                     CurrentTarget = nil
-                    StopCurrentTween()
                 end
             end
         else
-            StopCurrentTween()
+            ClearFlightPhysics()
             CurrentTarget = nil
         end
     end
@@ -405,7 +436,7 @@ local function BuildUI()
 
     local Header = Instance.new("TextLabel", Main)
     Header.Size = UDim2.new(1, 0, 0, 36)
-    Header.Text = "BLOXRUITS BOUNTY v79 (TWEEN ENGINE)"
+    Header.Text = "BLOXRUITS BOUNTY v80 (VELOCITY GLIDE)"
     Header.TextColor3 = Color3.fromRGB(240, 240, 255)
     Header.Font = Enum.Font.GothamBold
     Header.TextSize = 12
@@ -418,7 +449,7 @@ local function BuildUI()
     Toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
     Toggle.Font = Enum.Font.GothamBold
     Toggle.TextSize = 12
-    Toggle.Text = "AUTO BOUNTY TWEEN: OFF"
+    Toggle.Text = "AUTO BOUNTY GLIDE: OFF"
     local tCorner = Instance.new("UICorner", Toggle)
     tCorner.CornerRadius = UDim.new(0, 6)
 
@@ -534,9 +565,9 @@ local function BuildUI()
     Toggle.MouseButton1Click:Connect(function()
         Config.Enabled = not Config.Enabled
         Toggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(45, 160, 95) or Color3.fromRGB(35, 35, 48)
-        Toggle.Text = "AUTO BOUNTY TWEEN: " .. (Config.Enabled and "HUNTING ONLINE" or "OFF")
+        Toggle.Text = "AUTO BOUNTY GLIDE: " .. (Config.Enabled and "ONLINE (HUNTING)" or "OFF")
         if not Config.Enabled then
-            StopCurrentTween()
+            ClearFlightPhysics()
             CurrentTarget = nil
         end
     end)
@@ -599,16 +630,16 @@ local function BuildUI()
             end
 
             if not Config.Enabled then
-                Status.Text = string.format("Mode: IDLE | Selection: %s\nSafe-Segmented Tween: READY (350 studs/s)\nRelentless Kill Engine: ACTIVE", Config.TargetMode)
+                Status.Text = string.format("Mode: IDLE | Selection: %s\nContinuous Velocity: READY (%d studs/s)\nAnti-Rollback Physics: ACTIVE", Config.TargetMode, Config.FlySpeed)
             elseif CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") then
                 local lvl = GetPlayerLevel(CurrentTarget)
                 local hp, maxHp = GetPlayerHealth(CurrentTarget)
                 local dist = GetDistanceToPlayer(CurrentTarget)
-                local killState = CombatTracker.HasDealtDamage and "KILL CONFIRMED (EXECUTION)" or "APPROACHING / PROBING"
-                Status.Text = string.format("LOCKED: %s (Lv.%d) | Dist: %d studs\nHP: %d / %d | State: %s\nTarget: RELENTLESS ATTACK UNTIL DEAD",
+                local killState = CombatTracker.HasDealtDamage and "EXECUTION (RELENTLESS)" or "GLIDING TO TARGET"
+                Status.Text = string.format("LOCKED: %s (Lv.%d) | Dist: %d studs\nHP: %d / %d | State: %s\nAction: FAST ATTACK + SKILL COMBO",
                     CurrentTarget.Name, lvl, dist, hp, maxHp, killState)
             else
-                Status.Text = "Mode: ACQUIRING TARGET\nFinding nearest eligible bounty target..."
+                Status.Text = "Mode: ACQUIRING TARGET\nSearching eligible bounty target..."
             end
         end
     end)
