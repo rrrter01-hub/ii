@@ -1,9 +1,10 @@
--- [[ Blox Fruits Overhead Bounty Hunter v78 ]] --
--- Features: Zero-Bug Instant Teleport (Snap CFrame Y+11), Zero-Inertia Velocity Reset, Strict Command Lock, M1 + Skill Spam
+-- [[ Blox Fruits Overhead Bounty Hunter v79 ]] --
+-- Engine: Safe-Segmented Tween, Relentless Kill-Until-Dead, PvP/SafeZone Blacklist, Auto Haki/PvP, Full Telemetry
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 local VirtualUser = game:GetService("VirtualUser")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -18,24 +19,37 @@ local Humanoid = Character:WaitForChild("Humanoid")
 -- [[ Master Configuration ]] --
 local Config = {
     Enabled = false,
-    TargetMode = "Auto",     -- "Manual" (สั่งวาร์ปตัวไหนไปตัวนั้น 100%) หรือ "Auto" (ล่าเฉพาะคนมีค่าหัว)
+    TargetMode = "Auto",     -- "Auto" (เน้นเกาะใกล้/มีค่าหัว) หรือ "Manual" (เลือกเอง 100%)
     SelectedPlayer = nil,
     MinBountyLevel = 20,
-    OverheadDistance = 11,   -- ระยะลอยเหนือหัว (studs)
+    OverheadDistance = 11,   -- ระยะลอยเหนือหัวเป้าหมาย (studs)
+    TweenSpeed = 350,        -- ความเร็ว Tween ที่เสถียรที่สุด ไม่โดนเซิร์ฟเวอร์ดึงกลับ
     FastAttack = true,
     AutoHaki = true,
     AutoPvP = true,
     SkillSpam = true,
     Skills = {"Z", "X", "C", "V"},
     Weapons = {"Melee", "Sword", "Blox Fruit", "Gun"},
-    WeaponSwitchDelay = 0.5
+    WeaponSwitchDelay = 0.5,
+    DamageTestTime = 0.8,    -- เวลาทดสอบดาเมจ ถ้า 0.8 วิเลือดไม่ลด = ข้ามทันที
+    BlacklistTime = 90       -- แบนเป้าหมายที่ตีไม่เข้า 90 วินาที
 }
 
 local CurrentTarget = nil
+local CurrentTween = nil
 local CombatFramework = nil
 local ActiveController = nil
 local LastWeaponSwitch = 0
 local CurrentWeaponIndex = 1
+
+-- Tracking & Blacklist
+local BlacklistedTargets = {}
+local CombatTracker = {
+    Player = nil,
+    EngagedTime = 0,
+    InitialHP = 0,
+    HasDealtDamage = false
+}
 
 -- Remotes
 local Remotes = ReplicatedStorage:WaitForChild("Remotes", 5)
@@ -44,7 +58,7 @@ local NetModule = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStor
 local RegisterAttack = NetModule and (NetModule:FindFirstChild("RegisterAttack") or NetModule:FindFirstChild("RE/RegisterAttack"))
 local RegisterHit = NetModule and (NetModule:FindFirstChild("RegisterHit") or NetModule:FindFirstChild("RE/RegisterHit"))
 
--- [[ Helper: Level Parser ]] --
+-- [[ Helper: Level & Telemetry ]] --
 local function GetPlayerLevel(player)
     if not player then return 0 end
     local data = player:FindFirstChild("Data")
@@ -60,7 +74,6 @@ local function GetPlayerLevel(player)
     return 0
 end
 
--- [[ Helper: HP Parser ]] --
 local function GetPlayerHealth(player)
     if player and player.Character and player.Character:FindFirstChild("Humanoid") then
         local hum = player.Character.Humanoid
@@ -69,7 +82,6 @@ local function GetPlayerHealth(player)
     return 0, 0
 end
 
--- [[ Helper: Distance Parser ]] --
 local function GetDistanceToPlayer(player)
     if RootPart and player and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
         return math.floor((RootPart.Position - player.Character.HumanoidRootPart.Position).Magnitude)
@@ -77,23 +89,16 @@ local function GetDistanceToPlayer(player)
     return 999999
 end
 
--- [[ Helper: Check if PvP is Active on Target ]] --
 local function IsPvPActive(player)
     if not player or not player.Character then return false end
     local char = player.Character
-    if char:FindFirstChild("PvPDisabled") or player:FindFirstChild("PvPDisabled") then
-        return false
-    end
-    if char:FindFirstChildOfClass("ForceField") then
-        return false
-    end
-    if char:GetAttribute("PvPDisabled") == true or player:GetAttribute("PvPDisabled") == true then
-        return false
-    end
+    if char:FindFirstChild("PvPDisabled") or player:FindFirstChild("PvPDisabled") then return false end
+    if char:FindFirstChildOfClass("ForceField") then return false end
+    if char:GetAttribute("PvPDisabled") == true or player:GetAttribute("PvPDisabled") == true then return false end
     return true
 end
 
--- [[ Anti-Fall & Anti-Bug Physics Freeze ]] --
+-- [[ Anti-Desync Noclip & Anti-Gravity ]] --
 RunService.Stepped:Connect(function()
     if Config.Enabled and Character and RootPart then
         for _, part in ipairs(Character:GetDescendants()) do
@@ -101,7 +106,6 @@ RunService.Stepped:Connect(function()
                 part.CanCollide = false
             end
         end
-        -- ล็อคความเร็วฟิสิกส์ให้เป็น 0 ตลอดเวลา ป้องกันการตกแมพหรือเด้งถอยหลัง
         RootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
         RootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
     end
@@ -143,8 +147,8 @@ local function EnsurePvPAndHaki()
     end)
 end
 
--- [[ Auto Target Selector: Only Bounty-Eligible & PvP Active ]] --
-local function GetBestBountyTarget()
+-- [[ Target Filter: Same Island & Proximity First ]] --
+local function AcquireBestTarget()
     local best = nil
     local shortestDist = math.huge
     local myLevel = GetPlayerLevel(LocalPlayer)
@@ -155,7 +159,17 @@ local function GetBestBountyTarget()
             local hrp = p.Character.HumanoidRootPart
             local pLevel = GetPlayerLevel(p)
 
-            if hum.Health > 0 and IsPvPActive(p) and pLevel >= Config.MinBountyLevel then
+            -- ตรวจสอบว่าไม่อยู่ใน Blacklist
+            local isBlacklisted = false
+            if BlacklistedTargets[p] then
+                if tick() < BlacklistedTargets[p] then
+                    isBlacklisted = true
+                else
+                    BlacklistedTargets[p] = nil
+                end
+            end
+
+            if not isBlacklisted and hum.Health > 0 and IsPvPActive(p) and pLevel >= Config.MinBountyLevel then
                 local isBountyEligible = true
                 if myLevel > 100 and pLevel < (myLevel - 350) and pLevel < 2000 then
                     isBountyEligible = false
@@ -173,6 +187,34 @@ local function GetBestBountyTarget()
     end
 
     return best
+end
+
+-- [[ Safe-Segmented Tween Engine ]] --
+local function StopCurrentTween()
+    if CurrentTween then
+        CurrentTween:Cancel()
+        CurrentTween = nil
+    end
+end
+
+local function TweenToTarget(targetHRP)
+    local targetPos = targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0)
+    local targetCF = CFrame.new(targetPos, targetHRP.Position) * CFrame.Angles(math.rad(-90), 0, 0)
+    local dist = (RootPart.Position - targetPos).Magnitude
+
+    if dist <= 14 then
+        -- อยู่ในระยะหัวแล้ว ล็อคพิกัดทันที
+        StopCurrentTween()
+        RootPart.CFrame = targetCF
+    else
+        -- คำนวณเวลาการบินตามระยะทางจริง (ความเร็วคงที่ ไม่โดนแอนตี้ชีต)
+        local travelTime = dist / Config.TweenSpeed
+        StopCurrentTween()
+
+        local tweenInfo = TweenInfo.new(travelTime, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
+        CurrentTween = TweenService:Create(RootPart, tweenInfo, {CFrame = targetCF})
+        CurrentTween:Play()
+    end
 end
 
 -- [[ Weapon Switcher ]] --
@@ -245,18 +287,7 @@ local function CastSkills(targetHRP, targetHum)
     end
 end
 
--- [[ Instant Zero-Bug Teleport (Overhead Snap CFrame) ]] --
-local function InstantTeleportToTarget(targetHRP)
-    local targetOverheadPos = targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0)
-    local targetCF = CFrame.new(targetOverheadPos, targetHRP.Position) * CFrame.Angles(math.rad(-90), 0, 0)
-
-    -- วาร์ปปักหัวทันทีแบบไร้แรงเฉื่อย
-    RootPart.CFrame = targetCF
-    RootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-    RootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-end
-
--- [[ Master Combat & Instant TP Loop ]] --
+-- [[ Master Relentless Combat Loop ]] --
 task.spawn(function()
     while true do
         task.wait(0.015)
@@ -264,7 +295,7 @@ task.spawn(function()
         if Config.Enabled then
             EnsurePvPAndHaki()
 
-            -- ตรวจสอบเป้าหมายตามโหมด
+            -- 1. ตรวจสอบเป้าหมายปัจจุบัน
             if Config.TargetMode == "Manual" and Config.SelectedPlayer then
                 local p = Config.SelectedPlayer
                 if p and p.Parent and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") and p.Character.Humanoid.Health > 0 then
@@ -273,40 +304,76 @@ task.spawn(function()
                     CurrentTarget = nil
                 end
             else
+                -- Auto Mode: ล็อคเป้าหมายจนกว่าจะตายจริง (ห้ามสลับตัวไปมา)
                 if not CurrentTarget 
                     or not CurrentTarget.Parent 
                     or not CurrentTarget.Character 
                     or not CurrentTarget.Character:FindFirstChild("HumanoidRootPart") 
-                    or not CurrentTarget.Character:FindFirstChild("Humanoid")
+                    or not CurrentTarget.Character:FindFirstChild("Humanoid") 
                     or CurrentTarget.Character.Humanoid.Health <= 0 then
                     
-                    CurrentTarget = GetBestBountyTarget()
+                    CurrentTarget = AcquireBestTarget()
+                    CombatTracker.Player = CurrentTarget
+                    CombatTracker.EngagedTime = 0
+                    CombatTracker.InitialHP = 0
+                    CombatTracker.HasDealtDamage = false
                 end
             end
 
-            -- ทำการวาร์ปและโจมตี
+            -- 2. เข้าประชิดและทำการประหาร
             if CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
                 local tHRP = CurrentTarget.Character.HumanoidRootPart
                 local tHum = CurrentTarget.Character.Humanoid
 
                 if tHum.Health > 0 then
-                    -- วาร์ปปักหัวทันที (Zero Delay TP)
-                    InstantTeleportToTarget(tHRP)
+                    -- บิน Tween เข้าหัวเป้าหมาย
+                    TweenToTarget(tHRP)
 
-                    -- สลับอาวุธ
-                    if tick() - LastWeaponSwitch >= Config.WeaponSwitchDelay then
-                        SwitchWeapon()
-                        LastWeaponSwitch = tick()
+                    local dist = (RootPart.Position - tHRP.Position).Magnitude
+
+                    -- เมื่อเข้าถึงระยะทำการ (<= 25 studs)
+                    if dist <= 25 then
+                        -- ตรวจสอบดาเมจ (Damage Probe)
+                        if CombatTracker.Player ~= CurrentTarget or CombatTracker.EngagedTime == 0 then
+                            CombatTracker.Player = CurrentTarget
+                            CombatTracker.EngagedTime = tick()
+                            CombatTracker.InitialHP = tHum.Health
+                            CombatTracker.HasDealtDamage = false
+                        else
+                            -- ถ้าเลือดลดลง = ดาเมจเข้า! ให้ล็อคซัดต่อจนตาย
+                            if tHum.Health < CombatTracker.InitialHP then
+                                CombatTracker.HasDealtDamage = true
+                                CombatTracker.InitialHP = tHum.Health
+                                CombatTracker.EngagedTime = tick()
+                            elseif not CombatTracker.HasDealtDamage then
+                                -- ถ้าครบ 0.8 วิ แล้วเลือดยังไม่ลดแม้แต่นิดเดียว (ติด Safezone/ปิด PvP)
+                                if (tick() - CombatTracker.EngagedTime) >= Config.DamageTestTime then
+                                    BlacklistedTargets[CurrentTarget] = tick() + Config.BlacklistTime
+                                    CurrentTarget = nil
+                                    CombatTracker.EngagedTime = 0
+                                    StopCurrentTween()
+                                end
+                            end
+                        end
+
+                        if CurrentTarget then
+                            if tick() - LastWeaponSwitch >= Config.WeaponSwitchDelay then
+                                SwitchWeapon()
+                                LastWeaponSwitch = tick()
+                            end
+
+                            ExecuteFastAttack(tHRP)
+                            CastSkills(tHRP, tHum)
+                        end
                     end
-
-                    -- ฟันรัวๆ + สกิล
-                    ExecuteFastAttack(tHRP)
-                    CastSkills(tHRP, tHum)
                 else
+                    -- เป้าหมายตายสนิทแล้ว -> รีเซ็ตหาคนถัดไป
                     CurrentTarget = nil
+                    StopCurrentTween()
                 end
             end
         else
+            StopCurrentTween()
             CurrentTarget = nil
         end
     end
@@ -336,16 +403,14 @@ local function BuildUI()
     Stroke.Color = Color3.fromRGB(90, 95, 145)
     Stroke.Thickness = 1.5
 
-    -- Header Title
     local Header = Instance.new("TextLabel", Main)
     Header.Size = UDim2.new(1, 0, 0, 36)
-    Header.Text = "BLOXRUITS BOUNTY v78 (INSTANT TP)"
+    Header.Text = "BLOXRUITS BOUNTY v79 (TWEEN ENGINE)"
     Header.TextColor3 = Color3.fromRGB(240, 240, 255)
     Header.Font = Enum.Font.GothamBold
     Header.TextSize = 12
     Header.BackgroundTransparency = 1
 
-    -- Main Toggle Button
     local Toggle = Instance.new("TextButton", Main)
     Toggle.Size = UDim2.new(0.92, 0, 0, 38)
     Toggle.Position = UDim2.new(0.04, 0, 0, 38)
@@ -353,11 +418,10 @@ local function BuildUI()
     Toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
     Toggle.Font = Enum.Font.GothamBold
     Toggle.TextSize = 12
-    Toggle.Text = "AUTO BOUNTY TP: OFF"
+    Toggle.Text = "AUTO BOUNTY TWEEN: OFF"
     local tCorner = Instance.new("UICorner", Toggle)
     tCorner.CornerRadius = UDim.new(0, 6)
 
-    -- Mode Switch Button
     local ModeBtn = Instance.new("TextButton", Main)
     ModeBtn.Size = UDim2.new(0.92, 0, 0, 30)
     ModeBtn.Position = UDim2.new(0.04, 0, 0, 80)
@@ -365,11 +429,10 @@ local function BuildUI()
     ModeBtn.TextColor3 = Color3.fromRGB(180, 200, 255)
     ModeBtn.Font = Enum.Font.GothamBold
     ModeBtn.TextSize = 11
-    ModeBtn.Text = "TARGET MODE: AUTO (BOUNTY ONLY)"
+    ModeBtn.Text = "TARGET MODE: AUTO (PROXIMITY FIRST)"
     local mCorner = Instance.new("UICorner", ModeBtn)
     mCorner.CornerRadius = UDim.new(0, 6)
 
-    -- Nearest Radar HUD
     local NearestRadar = Instance.new("TextLabel", Main)
     NearestRadar.Size = UDim2.new(0.92, 0, 0, 44)
     NearestRadar.Position = UDim2.new(0.04, 0, 0, 114)
@@ -382,7 +445,6 @@ local function BuildUI()
     local rCorner = Instance.new("UICorner", NearestRadar)
     rCorner.CornerRadius = UDim.new(0, 6)
 
-    -- Scrollable Player List
     local PlayerListFrame = Instance.new("ScrollingFrame", Main)
     PlayerListFrame.Size = UDim2.new(0.92, 0, 0, 130)
     PlayerListFrame.Position = UDim2.new(0.04, 0, 0, 164)
@@ -397,7 +459,6 @@ local function BuildUI()
     UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
     UIListLayout.Padding = UDim.new(0, 4)
 
-    -- Status Monitor
     local Status = Instance.new("TextLabel", Main)
     Status.Size = UDim2.new(0.92, 0, 0, 80)
     Status.Position = UDim2.new(0.04, 0, 0, 300)
@@ -414,9 +475,7 @@ local function BuildUI()
 
     local function PopulatePlayerList()
         for _, child in ipairs(PlayerListFrame:GetChildren()) do
-            if child:IsA("TextButton") then
-                child:Destroy()
-            end
+            if child:IsA("TextButton") then child:Destroy() end
         end
         PlayerButtons = {}
 
@@ -459,7 +518,6 @@ local function BuildUI()
     Players.PlayerAdded:Connect(PopulatePlayerList)
     Players.PlayerRemoving:Connect(PopulatePlayerList)
 
-    -- Refresh List Button
     local RefreshBtn = Instance.new("TextButton", Main)
     RefreshBtn.Size = UDim2.new(0.92, 0, 0, 26)
     RefreshBtn.Position = UDim2.new(0.04, 0, 0, 388)
@@ -473,17 +531,16 @@ local function BuildUI()
 
     RefreshBtn.MouseButton1Click:Connect(PopulatePlayerList)
 
-    -- Toggle Button Event
     Toggle.MouseButton1Click:Connect(function()
         Config.Enabled = not Config.Enabled
         Toggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(45, 160, 95) or Color3.fromRGB(35, 35, 48)
-        Toggle.Text = "AUTO BOUNTY TP: " .. (Config.Enabled and "ONLINE (INSTANT TP)" or "OFF")
+        Toggle.Text = "AUTO BOUNTY TWEEN: " .. (Config.Enabled and "HUNTING ONLINE" or "OFF")
         if not Config.Enabled then
+            StopCurrentTween()
             CurrentTarget = nil
         end
     end)
 
-    -- Mode Switch Button Event
     ModeBtn.MouseButton1Click:Connect(function()
         if Config.TargetMode == "Auto" then
             Config.TargetMode = "Manual"
@@ -492,13 +549,12 @@ local function BuildUI()
         else
             Config.TargetMode = "Auto"
             Config.SelectedPlayer = nil
-            ModeBtn.Text = "TARGET MODE: AUTO (BOUNTY ONLY)"
+            ModeBtn.Text = "TARGET MODE: AUTO (PROXIMITY FIRST)"
             CurrentTarget = nil
             PopulatePlayerList()
         end
     end)
 
-    -- Real-time UI Refresh Loop
     task.spawn(function()
         while ScreenGui.Parent do
             task.wait(0.25)
@@ -543,15 +599,16 @@ local function BuildUI()
             end
 
             if not Config.Enabled then
-                Status.Text = string.format("Mode: IDLE | Selection: %s\nInstant Snap TP: READY (Y+%d)\nZero Inertia Freeze: ACTIVE", Config.TargetMode, Config.OverheadDistance)
+                Status.Text = string.format("Mode: IDLE | Selection: %s\nSafe-Segmented Tween: READY (350 studs/s)\nRelentless Kill Engine: ACTIVE", Config.TargetMode)
             elseif CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") then
                 local lvl = GetPlayerLevel(CurrentTarget)
                 local hp, maxHp = GetPlayerHealth(CurrentTarget)
                 local dist = GetDistanceToPlayer(CurrentTarget)
-                Status.Text = string.format("SNAP LOCKED: %s (Lv.%d) | Dist: %d studs\nHP: %d / %d | Mode: %s\nStatus: INSTANT TP STRIKE ACTIVE",
-                    CurrentTarget.Name, lvl, dist, hp, maxHp, Config.TargetMode)
+                local killState = CombatTracker.HasDealtDamage and "KILL CONFIRMED (EXECUTION)" or "APPROACHING / PROBING"
+                Status.Text = string.format("LOCKED: %s (Lv.%d) | Dist: %d studs\nHP: %d / %d | State: %s\nTarget: RELENTLESS ATTACK UNTIL DEAD",
+                    CurrentTarget.Name, lvl, dist, hp, maxHp, killState)
             else
-                Status.Text = "Mode: ACQUIRING TARGET\nSearching eligible bounty targets (PvP ON)..."
+                Status.Text = "Mode: ACQUIRING TARGET\nFinding nearest eligible bounty target..."
             end
         end
     end)
