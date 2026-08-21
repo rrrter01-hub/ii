@@ -1,15 +1,18 @@
--- [[ Blox Fruits Auto-Skip Non-PvP & Laser Bounty Hunter v68 ]] --
--- Features: Non-PvP Pre-Filter, 1.5s In-Range Damage Watchdog (Auto-Skip), Butter-Smooth Flight, Overhead AimLock
+-- [[ Blox Fruits Stable Overhead Bounty Hunter v69 ]] --
+-- Architecture: Overhead Hover (Y+11), BodyVelocity Zero-Inertia, Advanced Combat Hook (bladeHit + RegisterHit), Auto-Aim Skill Engine, Auto PvP Unlock & Buso Haki
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 local VirtualUser = game:GetService("VirtualUser")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
+local Mouse = LocalPlayer:GetMouse()
+
 local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 local RootPart = Character:WaitForChild("HumanoidRootPart")
 local Humanoid = Character:WaitForChild("Humanoid")
@@ -17,88 +20,111 @@ local Humanoid = Character:WaitForChild("Humanoid")
 -- [[ Master Configuration ]] --
 local Config = {
     Enabled = false,
-    OverheadDistance = 11,   -- ความสูงเหนือหัวเป้าหมาย (studs)
-    FlySpeed = 350,          -- ความเร็วบินพุ่ง (studs/s)
-    DamageTimeout = 1.5,     -- ตีถึงตัว 1.5 วิ เลือดไม่ลด = ปิด PvP -> สลับตัวทันที!
-    BlacklistTime = 60,      -- แบนตัวที่ไม่เปิด PvP 60 วินาที
+    OverheadDistance = 11,   -- Studs directly above target head
+    FlySpeed = 350,
     FastAttack = true,
     AutoHaki = true,
+    AutoPvP = true,          -- Auto unlock PvP disabled state
     SkillSpam = true,
     Skills = {"Z", "X", "C", "V"},
-    Weapons = {"Melee", "Sword", "Blox Fruit"}
+    Weapons = {"Melee", "Sword", "Blox Fruit", "Gun"},
+    WeaponSwitchDelay = 1.2
 }
 
 local CurrentTarget = nil
-local Blacklist = {} -- [Player] = ExpireTime
-local FlightVelocity = nil
+local BodyVel = nil
 local CombatFramework = nil
 local ActiveController = nil
+local LastWeaponSwitch = 0
+local CurrentWeaponIndex = 1
 
--- Watchdog Trackers
-local InCombatRange = false
-local CombatStartTimer = 0
-local InitialRecordedHealth = nil
+-- [[ Remote References ]] --
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 5)
+local CommF = Remotes and Remotes:WaitForChild("CommF_", 5)
+local NetModule = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Net")
+local RegisterAttack = NetModule and (NetModule:FindFirstChild("RegisterAttack") or NetModule:FindFirstChild("RE/RegisterAttack"))
+local RegisterHit = NetModule and (NetModule:FindFirstChild("RegisterHit") or NetModule:FindFirstChild("RE/RegisterHit"))
 
--- [[ Pure Physics Flight Engine ]] --
-local function EnsureFlightEngine()
+-- [[ Physics Anchor & Desync Prevention ]] --
+local function EnsurePhysicsAnchor()
     if not RootPart then return end
-    if not FlightVelocity or FlightVelocity.Parent ~= RootPart then
-        if FlightVelocity then FlightVelocity:Destroy() end
-        FlightVelocity = Instance.new("BodyVelocity")
-        FlightVelocity.Name = "OnyxSmoothVelocity"
-        FlightVelocity.Velocity = Vector3.new(0, 0, 0)
-        FlightVelocity.MaxForce = Vector3.new(9e9, 9e9, 9e9)
-        FlightVelocity.P = 10000
-        FlightVelocity.Parent = RootPart
+    if not BodyVel or BodyVel.Parent ~= RootPart then
+        if BodyVel then BodyVel:Destroy() end
+        BodyVel = Instance.new("BodyVelocity")
+        BodyVel.Name = "OnyxAnchor"
+        BodyVel.Velocity = Vector3.new(0, 0, 0)
+        BodyVel.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+        BodyVel.P = 1500
+        BodyVel.Parent = RootPart
     end
 end
 
-local function StopFlightEngine()
-    if FlightVelocity then
-        FlightVelocity:Destroy()
-        FlightVelocity = nil
+local function RemovePhysicsAnchor()
+    if BodyVel then
+        BodyVel:Destroy()
+        BodyVel = nil
     end
 end
 
--- [[ Clean Noclip ]] --
+-- [[ Stepped Noclip & Velocity Lock ]] --
 RunService.Stepped:Connect(function()
     if Config.Enabled and Character then
-        for _, part in ipairs(Character:GetChildren()) do
+        for _, part in ipairs(Character:GetDescendants()) do
             if part:IsA("BasePart") then
                 part.CanCollide = false
             end
         end
+        if RootPart then
+            RootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            RootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        end
     end
 end)
 
--- Character Refresh
+-- [[ Character Lifecycle ]] --
 LocalPlayer.CharacterAdded:Connect(function(char)
     Character = char
     RootPart = char:WaitForChild("HumanoidRootPart")
     Humanoid = char:WaitForChild("Humanoid")
     task.wait(0.5)
-    EnsureFlightEngine()
+    EnsurePhysicsAnchor()
+    SetupCombatHooks()
 end)
 
--- [[ Hook Combat Framework ]] --
-pcall(function()
-    local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
-    if playerScripts and playerScripts:FindFirstChild("CombatFramework") then
-        CombatFramework = require(playerScripts.CombatFramework)
-        ActiveController = CombatFramework.activeController
-    end
-end)
+-- [[ Combat Framework Hook ]] --
+function SetupCombatHooks()
+    pcall(function()
+        local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
+        if playerScripts and playerScripts:FindFirstChild("CombatFramework") then
+            CombatFramework = require(playerScripts.CombatFramework)
+            ActiveController = CombatFramework.activeController
+        end
+    end)
+end
+SetupCombatHooks()
 
--- [[ Auto Buso Haki ]] --
+-- [[ Auto Enable PvP System ]] --
+local function EnsurePvPEnabled()
+    if not Config.AutoPvP then return end
+    pcall(function()
+        if Character:FindFirstChild("PvPDisabled") or (LocalPlayer.PlayerGui:FindFirstChild("Main") and LocalPlayer.PlayerGui.Main:FindFirstChild("Pvp") and LocalPlayer.PlayerGui.Main.Pvp.Visible) then
+            if CommF then
+                CommF:InvokeServer("EnablePvp")
+            end
+        end
+    end)
+end
+
+-- [[ Auto Buso Haki System ]] --
 local function CheckHaki()
     if not Config.AutoHaki or not Character then return end
-    if not Character:FindFirstChild("HasBuso") then
-        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
-        local commF = remotes and remotes:FindFirstChild("CommF_")
-        if commF then
-            commF:InvokeServer("Buso")
+    pcall(function()
+        if not Character:FindFirstChild("HasBuso") then
+            if CommF then
+                CommF:InvokeServer("Buso")
+            end
         end
-    end
+    end)
 end
 
 -- [[ SafeZone Cache ]] --
@@ -122,245 +148,191 @@ local function IsInSafeZone(pos)
     return false
 end
 
--- [[ Strict PvP & Target Filter ]] --
-local function IsValidPvPTarget(player)
-    if not player or player == LocalPlayer or not player.Parent then return false end
-    
-    -- Check Blacklist (พวกปิด PvP หรืออยู่ในเซฟ)
-    if Blacklist[player] and tick() < Blacklist[player] then return false end
-
-    local char = player.Character
-    if not char then return false end
-
-    local hum = char:FindFirstChild("Humanoid")
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hum or not hrp or hum.Health <= 0 then return false end
-
-    -- 1. Shield & PvP Disabled Tags
-    if char:FindFirstChildOfClass("ForceField") or char:FindFirstChild("SafeZoneShield") or char:FindFirstChild("PvPDisabled") then
-        return false
-    end
-
-    -- 2. Blox Fruits Data Folder Check
-    local data = player:FindFirstChild("Data")
-    if data then
-        if data:FindFirstChild("PvP") and data.PvP.Value == false then
-            return false
-        end
-        if data:FindFirstChild("Level") and data.Level.Value < 20 then
-            return false
-        end
-    end
-
-    -- 3. SafeZone Location Check
-    if IsInSafeZone(hrp.Position) then
-        return false
-    end
-
-    return true
-end
-
--- [[ Skip & Blacklist Target ]] --
-local function SkipCurrentTarget(reason)
-    if CurrentTarget then
-        Blacklist[CurrentTarget] = tick() + Config.BlacklistTime
-        print(string.format("[Hunter Watchdog] ⏩ Skipped Target '%s': %s (Blacklisted %ds)", CurrentTarget.Name, reason or "Non-PvP", Config.BlacklistTime))
-    end
-    CurrentTarget = nil
-    InCombatRange = false
-    CombatStartTimer = 0
-    InitialRecordedHealth = nil
-end
-
 -- [[ Target Selector ]] --
 local function GetBestTarget()
-    -- Clear Expired Blacklist
-    local now = tick()
-    for p, expire in pairs(Blacklist) do
-        if now >= expire then Blacklist[p] = nil end
-    end
-
     local best = nil
     local shortest = math.huge
 
     for _, p in ipairs(Players:GetPlayers()) do
-        if IsValidPvPTarget(p) then
-            local dist = (RootPart.Position - p.Character.HumanoidRootPart.Position).Magnitude
-            if dist < shortest then
-                shortest = dist
-                best = p
+        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") then
+            local char = p.Character
+            local hum = char.Humanoid
+            local hrp = char.HumanoidRootPart
+
+            if hum.Health > 0 and not char:FindFirstChildOfClass("ForceField") and not char:FindFirstChild("PvPDisabled") then
+                if not IsInSafeZone(hrp.Position) then
+                    local dist = (RootPart.Position - hrp.Position).Magnitude
+                    if dist < shortest then
+                        shortest = dist
+                        best = p
+                    end
+                end
             end
         end
     end
     return best
 end
 
--- [[ Auto Equip Weapon ]] --
-local function EquipPreferredWeapon()
+-- [[ Smart Weapon Rotator ]] --
+local function SwitchToNextWeapon()
     local backpack = LocalPlayer:FindFirstChild("Backpack")
-    if not backpack or not Character then return end
+    if not backpack or not Character or not Humanoid then return end
 
-    if not Character:FindFirstChildOfClass("Tool") then
-        for _, category in ipairs(Config.Weapons) do
-            for _, tool in ipairs(backpack:GetChildren()) do
-                if tool:IsA("Tool") then
-                    local tType = tool:GetAttribute("WeaponType") or tool.ToolTip
-                    if tType == category or tool.Name:lower():find(category:lower()) or (category == "Melee" and tool:FindFirstChild("CombatScript")) then
-                        Humanoid:EquipTool(tool)
-                        return
-                    end
-                end
+    local category = Config.Weapons[CurrentWeaponIndex]
+    local targetTool = nil
+
+    -- Find matching weapon tool in Backpack or Character
+    for _, tool in ipairs(backpack:GetChildren()) do
+        if tool:IsA("Tool") then
+            local tType = tool:GetAttribute("WeaponType") or tool.ToolTip
+            if tType == category or tool.Name:lower():find(category:lower()) or (category == "Melee" and (tool:FindFirstChild("CombatScript") or tool.ToolTip == "Melee")) then
+                targetTool = tool
+                break
             end
         end
     end
-end
 
--- [[ AimLock Camera ]] --
-local function AimAtTarget(targetPosition)
-    Camera.CFrame = CFrame.new(Camera.CFrame.Position, targetPosition)
-end
-
--- [[ Real Fast Attack Registration ]] --
-local function ExecuteFastAttack()
-    if not Config.FastAttack then return end
-
-    if ActiveController and ActiveController.attack then
-        pcall(function()
-            ActiveController.timeToNextAttack = 0
-            ActiveController.hitboxMagnitude = 75
-            ActiveController:attack()
-        end)
+    if targetTool then
+        Humanoid:EquipTool(targetTool)
     end
 
+    CurrentWeaponIndex = (CurrentWeaponIndex % #Config.Weapons) + 1
+end
+
+-- [[ Real Fast Attack & Packet Hit Registration Engine ]] --
+local function ExecuteFastAttack(targetHRP)
+    if not Config.FastAttack or not targetHRP then return end
+
+    -- 1. Direct BladeHit / Hitbox Bypass
+    pcall(function()
+        if not ActiveController then
+            SetupCombatHooks()
+        end
+        if ActiveController then
+            ActiveController.timeToNextAttack = 0
+            ActiveController.attacking = false
+            ActiveController.blocking = false
+            ActiveController.hitboxMagnitude = 80
+            ActiveController.increment = 3
+            if ActiveController.attack then
+                ActiveController:attack()
+            end
+            if ActiveController.bladeHit then
+                ActiveController.bladeHit(targetHRP, {targetHRP})
+            end
+        end
+    end)
+
+    -- 2. Net Remote Attack Registration
+    pcall(function()
+        if RegisterAttack then
+            RegisterAttack:FireServer(0)
+        end
+        if RegisterHit then
+            local hitTable = {{targetHRP.Parent, targetHRP}}
+            RegisterHit:FireServer(targetHRP, hitTable)
+        end
+    end)
+
+    -- 3. Tool Click Emulation & Hardware Input Fallback
     local currentTool = Character:FindFirstChildOfClass("Tool")
     if currentTool then
         currentTool:Activate()
     end
-    
     VirtualUser:CaptureController()
     VirtualUser:Button1Down(Vector2.new(0, 0))
     VirtualUser:Button1Up(Vector2.new(0, 0))
-
-    local net = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Net")
-    if net and net:FindFirstChild("RegisterAttack") then
-        net.RegisterAttack:FireServer(0)
-    end
 end
 
--- [[ Butter-Smooth Flight Movement ]] --
-local function SmoothFlight(targetHRP)
-    EnsureFlightEngine()
-    
-    local targetOverheadPos = targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0)
-    local currentPos = RootPart.Position
-    local direction = (targetOverheadPos - currentPos)
-    local distance = direction.Magnitude
-
-    if distance > 15 then
-        -- 🚀 LASER FLIGHT: พุ่งตรงแบบ 60 FPS
-        FlightVelocity.Velocity = direction.Unit * Config.FlySpeed
-        InCombatRange = false
-    else
-        -- 🎯 OVERHEAD LOCK: ลอยนิ่งเหนือหัว Y+11
-        FlightVelocity.Velocity = Vector3.new(0, 0, 0)
-        RootPart.CFrame = CFrame.new(targetOverheadPos, targetHRP.Position)
-    end
+-- [[ Direct Camera & Skill Vector Aim ]] --
+local function AimAtTarget(targetPos)
+    pcall(function()
+        Camera.CFrame = CFrame.new(Camera.CFrame.Position, targetPos)
+    end)
 end
 
--- [[ THREAD 1: Continuous M1 Fast Attack ]] --
-task.spawn(function()
-    while true do
-        task.wait(0.02)
-        if Config.Enabled and CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
-            local tHRP = CurrentTarget.Character.HumanoidRootPart
-            local dist = (RootPart.Position - tHRP.Position).Magnitude
-            if dist <= (Config.OverheadDistance + 14) then
-                EquipPreferredWeapon()
-                AimAtTarget(tHRP.Position)
-                ExecuteFastAttack()
-            end
-        end
-    end
-end)
+-- [[ Skill Execution Engine ]] --
+local function FireSkills(targetHRP, targetHum)
+    if not Config.SkillSpam or not targetHRP or targetHum.Health <= 0 then return end
 
--- [[ THREAD 2: Parallel Skills AimLock ]] --
-task.spawn(function()
-    while true do
+    AimAtTarget(targetHRP.Position)
+    for _, key in ipairs(Config.Skills) do
+        if not CurrentTarget or targetHum.Health <= 0 then break end
+        
+        AimAtTarget(targetHRP.Position)
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode[key], false, game)
+        task.wait(0.05)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode[key], false, game)
         task.wait(0.08)
-        if Config.Enabled and Config.SkillSpam and CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
-            local tHRP = CurrentTarget.Character.HumanoidRootPart
-            local tHum = CurrentTarget.Character:FindFirstChild("Humanoid")
-            local dist = (RootPart.Position - tHRP.Position).Magnitude
-
-            if dist <= (Config.OverheadDistance + 14) and tHum and tHum.Health > 0 then
-                for _, key in ipairs(Config.Skills) do
-                    if not Config.Enabled or not CurrentTarget or tHum.Health <= 0 then break end
-                    AimAtTarget(tHRP.Position)
-                    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode[key], false, game)
-                    task.wait(0.04)
-                    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode[key], false, game)
-                    task.wait(0.12)
-                end
-            end
-        end
     end
-end)
+end
 
--- [[ Master Navigation & 1.5s Non-PvP Auto-Skip Watchdog ]] --
+-- [[ Overhead Positioning Engine ]] --
+local function HoverOverhead(targetHRP)
+    EnsurePhysicsAnchor()
+    
+    local overheadCFrame = CFrame.new(targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0)) * CFrame.Angles(math.rad(-90), 0, 0)
+    local currentPos = RootPart.Position
+    local targetPos = overheadCFrame.Position
+    local dist = (currentPos - targetPos).Magnitude
+
+    if dist > 120 then
+        RootPart.CFrame = CFrame.new(currentPos:Lerp(targetPos, (Config.FlySpeed * 0.03) / dist))
+    else
+        RootPart.CFrame = overheadCFrame
+    end
+end
+
+-- [[ Master Combat Loop ]] --
 task.spawn(function()
     while true do
-        task.wait(0.02)
+        task.wait(0.015)
         
         if Config.Enabled then
+            EnsurePvPEnabled()
+            CheckHaki()
+
             -- Validate Target
-            if not CurrentTarget or not IsValidPvPTarget(CurrentTarget) then
-                if CurrentTarget then
-                    SkipCurrentTarget("Target invalid / entered SafeZone")
-                end
+            if not CurrentTarget 
+                or not CurrentTarget.Character 
+                or not CurrentTarget.Character:FindFirstChild("Humanoid") 
+                or not CurrentTarget.Character:FindFirstChild("HumanoidRootPart")
+                or CurrentTarget.Character.Humanoid.Health <= 0 
+                or CurrentTarget.Character:FindFirstChild("PvPDisabled")
+                or IsInSafeZone(CurrentTarget.Character.HumanoidRootPart.Position) then
                 CurrentTarget = GetBestTarget()
-                InCombatRange = false
-                CombatStartTimer = 0
-                InitialRecordedHealth = nil
             end
 
             if CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
                 local tHRP = CurrentTarget.Character.HumanoidRootPart
-                local tHum = CurrentTarget.Character:FindFirstChild("Humanoid")
-                
-                -- Smooth Gliding to Target
-                SmoothFlight(tHRP)
-                CheckHaki()
+                local tHum = CurrentTarget.Character.Humanoid
 
-                -- [[ 1.5s NON-PVP AUTO-SKIP WATCHDOG ]] --
+                -- Lock Position Overhead
+                HoverOverhead(tHRP)
+
+                -- Weapon Switch Timer
+                if tick() - LastWeaponSwitch >= Config.WeaponSwitchDelay then
+                    SwitchToNextWeapon()
+                    LastWeaponSwitch = tick()
+                end
+
+                -- Range Check for Attack Delivery
                 local dist = (RootPart.Position - tHRP.Position).Magnitude
-                if dist <= (Config.OverheadDistance + 14) and tHum then
-                    if not InCombatRange then
-                        -- เพิ่งบินมาถึงหัวเป้าหมาย: เริ่มจับเวลาดาเมจ
-                        InCombatRange = true
-                        CombatStartTimer = tick()
-                        InitialRecordedHealth = tHum.Health
-                    else
-                        -- ถึงหัวแล้วเกิน 1.5 วินาที: ตรวจสอบเลือด
-                        if tick() - CombatStartTimer >= Config.DamageTimeout then
-                            if tHum.Health >= InitialRecordedHealth then
-                                -- เลือดไม่ลด = ปิด PvP / อยู่ในโซนอมเลือด -> ข้ามไปหาตัวอื่นทันที!
-                                SkipCurrentTarget("Non-PvP / Zero Damage Detected")
-                            else
-                                -- ตีเข้าปกติ -> รีเฟรชเลือดแล้วล่าต่อจนตาย
-                                InitialRecordedHealth = tHum.Health
-                                CombatStartTimer = tick()
-                            end
-                        end
-                    end
+                if dist <= (Config.OverheadDistance + 15) then
+                    -- Execute M1 Fast Attack
+                    ExecuteFastAttack(tHRP)
+
+                    -- Cast Aimed Skills
+                    FireSkills(tHRP, tHum)
                 end
             end
         else
-            StopFlightEngine()
+            RemovePhysicsAnchor()
         end
     end
 end)
 
--- [[ Clean Redz-Style Dark UI ]] --
+-- [[ UI Interface ]] --
 local function BuildUI()
     local ScreenGui = Instance.new("ScreenGui")
     ScreenGui.Name = "OnyxOverheadHub"
@@ -370,9 +342,9 @@ local function BuildUI()
     ScreenGui.Parent = success and coreGui or LocalPlayer:WaitForChild("PlayerGui")
 
     local Main = Instance.new("Frame", ScreenGui)
-    Main.Size = UDim2.new(0, 310, 0, 260)
-    Main.Position = UDim2.new(0.5, -155, 0.28, 0)
-    Main.BackgroundColor3 = Color3.fromRGB(17, 17, 24)
+    Main.Size = UDim2.new(0, 320, 0, 270)
+    Main.Position = UDim2.new(0.5, -160, 0.25, 0)
+    Main.BackgroundColor3 = Color3.fromRGB(15, 15, 22)
     Main.BorderSizePixel = 0
     Main.Active = true
     Main.Draggable = true
@@ -381,18 +353,17 @@ local function BuildUI()
     Corner.CornerRadius = UDim.new(0, 8)
 
     local Stroke = Instance.new("UIStroke", Main)
-    Stroke.Color = Color3.fromRGB(75, 80, 110)
+    Stroke.Color = Color3.fromRGB(80, 85, 120)
     Stroke.Thickness = 1.5
 
     local Header = Instance.new("TextLabel", Main)
     Header.Size = UDim2.new(1, 0, 0, 36)
-    Header.Text = "BLOXRUITS AUTO-SKIP BOUNTY v68"
-    Header.TextColor3 = Color3.fromRGB(245, 245, 255)
+    Header.Text = "BLOXRUITS OVERHEAD BOUNTY v69"
+    Header.TextColor3 = Color3.fromRGB(240, 240, 255)
     Header.Font = Enum.Font.GothamBold
     Header.TextSize = 12
     Header.BackgroundTransparency = 1
 
-    -- Toggle Button
     local Toggle = Instance.new("TextButton", Main)
     Toggle.Size = UDim2.new(0.9, 0, 0, 44)
     Toggle.Position = UDim2.new(0.05, 0, 0, 44)
@@ -400,48 +371,44 @@ local function BuildUI()
     Toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
     Toggle.Font = Enum.Font.GothamBold
     Toggle.TextSize = 13
-    Toggle.Text = "AUTO BOUNTY: OFF"
+    Toggle.Text = "AUTO BOUNTY HUNTER: OFF"
     local tCorner = Instance.new("UICorner", Toggle)
     tCorner.CornerRadius = UDim.new(0, 6)
 
     Toggle.MouseButton1Click:Connect(function()
         Config.Enabled = not Config.Enabled
-        Toggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(40, 150, 90) or Color3.fromRGB(35, 35, 48)
-        Toggle.Text = "AUTO BOUNTY: " .. (Config.Enabled and "RUNNING (AUTO-SKIP)" or "OFF")
+        Toggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(45, 160, 95) or Color3.fromRGB(35, 35, 48)
+        Toggle.Text = "AUTO BOUNTY HUNTER: " .. (Config.Enabled and "ENABLED (HUNTING)" or "OFF")
         if not Config.Enabled then
-            StopFlightEngine()
+            RemovePhysicsAnchor()
             CurrentTarget = nil
         end
     end)
 
-    -- Status Monitor
     local Status = Instance.new("TextLabel", Main)
-    Status.Size = UDim2.new(0.9, 0, 0, 140)
+    Status.Size = UDim2.new(0.9, 0, 0, 150)
     Status.Position = UDim2.new(0.05, 0, 0, 98)
-    Status.BackgroundColor3 = Color3.fromRGB(24, 24, 34)
+    Status.BackgroundColor3 = Color3.fromRGB(22, 22, 32)
     Status.TextColor3 = Color3.fromRGB(200, 220, 255)
     Status.Font = Enum.Font.Gotham
     Status.TextSize = 12
     Status.TextWrapped = true
-    Status.Text = "Status: Waiting for activation..."
+    Status.Text = "Status: Idle. Standing by..."
     local sCorner = Instance.new("UICorner", Status)
     sCorner.CornerRadius = UDim.new(0, 6)
 
     task.spawn(function()
         while ScreenGui.Parent do
             task.wait(0.25)
-            local blCount = 0
-            for _ in pairs(Blacklist) do blCount = blCount + 1 end
-
             if not Config.Enabled then
-                Status.Text = string.format("Mode: IDLE\nAuto-Skip Non-PvP: 1.5s Active\nIgnored/Blacklisted: %d players", blCount)
+                Status.Text = "Mode: IDLE\nAuto Buso Haki: READY\nAuto PvP Unlock: READY\nOverhead Position: Y+11 Studs"
             elseif CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") then
                 local hp = math.floor(CurrentTarget.Character.Humanoid.Health)
                 local maxHp = math.floor(CurrentTarget.Character.Humanoid.MaxHealth)
-                Status.Text = string.format("🎯 Locked Target: %s\nHP: %d / %d\nState: %s\nWatchdog: Active (1.5s Probe)\nSkipped: %d players",
-                    CurrentTarget.Name, hp, maxHp, InCombatRange and "ATTACKING (In-Range)" or "GLIDING TO TARGET", blCount)
+                Status.Text = string.format("Locked Target: %s\nTarget HP: %d / %d\nWeapon Cycle: %s\nM1 Fast Attack: ACTIVE\nAim & Skills (Z,X,C,V): FIRING\nBuso & PvP: ENFORCED",
+                    CurrentTarget.Name, hp, maxHp, Config.Weapons[CurrentWeaponIndex] or "Melee")
             else
-                Status.Text = string.format("Mode: HUNTING\nScanning next PvP player...\nSkipped Non-PvP: %d players", blCount)
+                Status.Text = "Mode: HUNTING\nScanning nearest valid PvP targets outside safezones..."
             end
         end
     end)
