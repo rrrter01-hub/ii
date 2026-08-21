@@ -1,5 +1,5 @@
--- [[ Blox Fruits Overhead Bounty Hunter v77 ]] --
--- Fix: 100% Strict Command Obedience (Manual Override), Bounty-Eligible Filter (No Low Levels/No PvP-Off), Zero-Distraction Hard Lock
+-- [[ Blox Fruits Overhead Bounty Hunter v78 ]] --
+-- Features: Zero-Bug Instant Teleport (Snap CFrame Y+11), Zero-Inertia Velocity Reset, Strict Command Lock, M1 + Skill Spam
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -18,22 +18,20 @@ local Humanoid = Character:WaitForChild("Humanoid")
 -- [[ Master Configuration ]] --
 local Config = {
     Enabled = false,
-    TargetMode = "Auto",     -- "Manual" (สั่งล็อกตัวไหนไปตัวนั้น 100%) หรือ "Auto" (ล่าเฉพาะคนมีค่าหัว)
+    TargetMode = "Auto",     -- "Manual" (สั่งวาร์ปตัวไหนไปตัวนั้น 100%) หรือ "Auto" (ล่าเฉพาะคนมีค่าหัว)
     SelectedPlayer = nil,
-    MinBountyLevel = 20,     -- ข้ามพวกเวลต่ำกว่าเกณฑ์ที่ไม่ได้ค่าหัว
-    OverheadDistance = 11,
-    FlySpeed = 350,
+    MinBountyLevel = 20,
+    OverheadDistance = 11,   -- ระยะลอยเหนือหัว (studs)
     FastAttack = true,
     AutoHaki = true,
     AutoPvP = true,
     SkillSpam = true,
     Skills = {"Z", "X", "C", "V"},
     Weapons = {"Melee", "Sword", "Blox Fruit", "Gun"},
-    WeaponSwitchDelay = 0.6
+    WeaponSwitchDelay = 0.5
 }
 
 local CurrentTarget = nil
-local FlightVelocity = nil
 local CombatFramework = nil
 local ActiveController = nil
 local LastWeaponSwitch = 0
@@ -95,38 +93,17 @@ local function IsPvPActive(player)
     return true
 end
 
--- [[ Anti-Rubberband Flight Controller ]] --
-local function InitFlightController()
-    if not RootPart then return end
-    if not FlightVelocity or FlightVelocity.Parent ~= RootPart then
-        if FlightVelocity then FlightVelocity:Destroy() end
-        FlightVelocity = Instance.new("BodyVelocity")
-        FlightVelocity.Name = "AntiDesyncFlight"
-        FlightVelocity.Velocity = Vector3.new(0, 0, 0)
-        FlightVelocity.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-        FlightVelocity.P = 10000
-        FlightVelocity.Parent = RootPart
-    end
-end
-
-local function KillFlightController()
-    if FlightVelocity then
-        FlightVelocity:Destroy()
-        FlightVelocity = nil
-    end
-end
-
--- [[ Anti-Desync Noclip ]] --
-RunService.Heartbeat:Connect(function()
+-- [[ Anti-Fall & Anti-Bug Physics Freeze ]] --
+RunService.Stepped:Connect(function()
     if Config.Enabled and Character and RootPart then
         for _, part in ipairs(Character:GetDescendants()) do
             if part:IsA("BasePart") then
                 part.CanCollide = false
             end
         end
-        if Humanoid then
-            Humanoid.PlatformStand = true
-        end
+        -- ล็อคความเร็วฟิสิกส์ให้เป็น 0 ตลอดเวลา ป้องกันการตกแมพหรือเด้งถอยหลัง
+        RootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        RootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
     end
 end)
 
@@ -134,8 +111,7 @@ LocalPlayer.CharacterAdded:Connect(function(char)
     Character = char
     RootPart = char:WaitForChild("HumanoidRootPart")
     Humanoid = char:WaitForChild("Humanoid")
-    task.wait(0.5)
-    InitFlightController()
+    task.wait(0.3)
     SetupCombatHooks()
 end)
 
@@ -179,9 +155,7 @@ local function GetBestBountyTarget()
             local hrp = p.Character.HumanoidRootPart
             local pLevel = GetPlayerLevel(p)
 
-            -- เงื่อนไข: เลือด > 0, เปิด PvP, เวลถึงเกณฑ์ที่จะได้ค่าหัว
             if hum.Health > 0 and IsPvPActive(p) and pLevel >= Config.MinBountyLevel then
-                -- ถ้าเราเวลสูง ตรวจสอบไม่ให้ตีคนเวลต่ำเกินไปที่ไม่ได้ Bounty
                 local isBountyEligible = true
                 if myLevel > 100 and pLevel < (myLevel - 350) and pLevel < 2000 then
                     isBountyEligible = false
@@ -267,30 +241,22 @@ local function CastSkills(targetHRP, targetHum)
         VirtualInputManager:SendKeyEvent(true, Enum.KeyCode[key], false, game)
         task.wait(0.02)
         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode[key], false, game)
-        task.wait(0.04)
+        task.wait(0.03)
     end
 end
 
--- [[ Direct Missile Flight Engine ]] --
-local function MoveTowardsTarget(targetHRP)
-    InitFlightController()
-    
-    local targetPos = targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0)
-    local curPos = RootPart.Position
-    local delta = (targetPos - curPos)
-    local dist = delta.Magnitude
+-- [[ Instant Zero-Bug Teleport (Overhead Snap CFrame) ]] --
+local function InstantTeleportToTarget(targetHRP)
+    local targetOverheadPos = targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0)
+    local targetCF = CFrame.new(targetOverheadPos, targetHRP.Position) * CFrame.Angles(math.rad(-90), 0, 0)
 
-    RootPart.CFrame = CFrame.new(curPos, targetHRP.Position) * CFrame.Angles(math.rad(-90), 0, 0)
-
-    if dist > 8 then
-        FlightVelocity.Velocity = delta.Unit * Config.FlySpeed
-    else
-        FlightVelocity.Velocity = Vector3.new(0, 0, 0)
-        RootPart.CFrame = CFrame.new(targetPos, targetHRP.Position) * CFrame.Angles(math.rad(-90), 0, 0)
-    end
+    -- วาร์ปปักหัวทันทีแบบไร้แรงเฉื่อย
+    RootPart.CFrame = targetCF
+    RootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    RootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
 end
 
--- [[ Master Combat Loop (Hard Lock & No Distraction) ]] --
+-- [[ Master Combat & Instant TP Loop ]] --
 task.spawn(function()
     while true do
         task.wait(0.015)
@@ -298,9 +264,8 @@ task.spawn(function()
         if Config.Enabled then
             EnsurePvPAndHaki()
 
-            -- 1. ตรวจสอบเป้าหมายตามโหมด
+            -- ตรวจสอบเป้าหมายตามโหมด
             if Config.TargetMode == "Manual" and Config.SelectedPlayer then
-                -- โหมดเลือกเอง: ล็อคเป้าหมายคนนี้ 100% ห้ามเปลี่ยน
                 local p = Config.SelectedPlayer
                 if p and p.Parent and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") and p.Character.Humanoid.Health > 0 then
                     CurrentTarget = p
@@ -308,7 +273,6 @@ task.spawn(function()
                     CurrentTarget = nil
                 end
             else
-                -- โหมด Auto: ล็อคคนที่ได้ค่าหัว จนกว่าจะตาย (ห้ามสลับตัวกลางอากาศ)
                 if not CurrentTarget 
                     or not CurrentTarget.Parent 
                     or not CurrentTarget.Character 
@@ -320,30 +284,29 @@ task.spawn(function()
                 end
             end
 
-            -- 2. ดำเนินการพุ่งจุ่มและโจมตีแบบไม่วอกแวก
+            -- ทำการวาร์ปและโจมตี
             if CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
                 local tHRP = CurrentTarget.Character.HumanoidRootPart
                 local tHum = CurrentTarget.Character.Humanoid
 
-                -- บินพุ่งตรงไปหาเป้าหมาย
-                MoveTowardsTarget(tHRP)
+                if tHum.Health > 0 then
+                    -- วาร์ปปักหัวทันที (Zero Delay TP)
+                    InstantTeleportToTarget(tHRP)
 
-                local dist = (RootPart.Position - tHRP.Position).Magnitude
-
-                -- ถึงระยะหัว (11 + 15 studs) -> ฟันรัวๆ + สกิล
-                if dist <= (Config.OverheadDistance + 15) then
+                    -- สลับอาวุธ
                     if tick() - LastWeaponSwitch >= Config.WeaponSwitchDelay then
                         SwitchWeapon()
                         LastWeaponSwitch = tick()
                     end
 
+                    -- ฟันรัวๆ + สกิล
                     ExecuteFastAttack(tHRP)
                     CastSkills(tHRP, tHum)
+                else
+                    CurrentTarget = nil
                 end
             end
         else
-            KillFlightController()
-            if Humanoid then Humanoid.PlatformStand = false end
             CurrentTarget = nil
         end
     end
@@ -376,7 +339,7 @@ local function BuildUI()
     -- Header Title
     local Header = Instance.new("TextLabel", Main)
     Header.Size = UDim2.new(1, 0, 0, 36)
-    Header.Text = "BLOXRUITS BOUNTY v77 (STRICT LOCK)"
+    Header.Text = "BLOXRUITS BOUNTY v78 (INSTANT TP)"
     Header.TextColor3 = Color3.fromRGB(240, 240, 255)
     Header.Font = Enum.Font.GothamBold
     Header.TextSize = 12
@@ -390,7 +353,7 @@ local function BuildUI()
     Toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
     Toggle.Font = Enum.Font.GothamBold
     Toggle.TextSize = 12
-    Toggle.Text = "AUTO BOUNTY: OFF"
+    Toggle.Text = "AUTO BOUNTY TP: OFF"
     local tCorner = Instance.new("UICorner", Toggle)
     tCorner.CornerRadius = UDim.new(0, 6)
 
@@ -481,7 +444,6 @@ local function BuildUI()
                 PlayerButtons[p] = pBtn
 
                 pBtn.MouseButton1Click:Connect(function()
-                    -- ล็อคตัวนี้ทันที 100% ไม่ขัดคำสั่ง
                     Config.SelectedPlayer = p
                     Config.TargetMode = "Manual"
                     ModeBtn.Text = "TARGET MODE: MANUAL (" .. p.Name .. ")"
@@ -515,10 +477,8 @@ local function BuildUI()
     Toggle.MouseButton1Click:Connect(function()
         Config.Enabled = not Config.Enabled
         Toggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(45, 160, 95) or Color3.fromRGB(35, 35, 48)
-        Toggle.Text = "AUTO BOUNTY: " .. (Config.Enabled and "ONLINE (LOCKED)" or "OFF")
+        Toggle.Text = "AUTO BOUNTY TP: " .. (Config.Enabled and "ONLINE (INSTANT TP)" or "OFF")
         if not Config.Enabled then
-            KillFlightController()
-            if Humanoid then Humanoid.PlatformStand = false end
             CurrentTarget = nil
         end
     end)
@@ -543,7 +503,6 @@ local function BuildUI()
         while ScreenGui.Parent do
             task.wait(0.25)
             
-            -- อัปเดตปุ่มในรายการผู้เล่น
             for p, btn in pairs(PlayerButtons) do
                 if p and p.Parent then
                     local lvl = GetPlayerLevel(p)
@@ -559,7 +518,6 @@ local function BuildUI()
                 end
             end
 
-            -- ค้นหาคนที่ใกล้ที่สุดที่เปิด PvP
             local nearestP = nil
             local minD = math.huge
             if RootPart then
@@ -584,14 +542,13 @@ local function BuildUI()
                 NearestRadar.Text = "🎯 NEAREST (PvP ON): No PvP-enabled players nearby"
             end
 
-            -- กล่องบอกสถานะเป้าหมายที่ล็อค
             if not Config.Enabled then
-                Status.Text = string.format("Mode: IDLE | Selection: %s\nHard Lock: READY\nClick any player to commit 100%% attack.", Config.TargetMode)
+                Status.Text = string.format("Mode: IDLE | Selection: %s\nInstant Snap TP: READY (Y+%d)\nZero Inertia Freeze: ACTIVE", Config.TargetMode, Config.OverheadDistance)
             elseif CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") then
                 local lvl = GetPlayerLevel(CurrentTarget)
                 local hp, maxHp = GetPlayerHealth(CurrentTarget)
                 local dist = GetDistanceToPlayer(CurrentTarget)
-                Status.Text = string.format("HARD LOCKED: %s (Lv.%d) | Dist: %d studs\nHP: %d / %d | Mode: %s\nAction: DIVE & STRIKE (NO DISTRACTION)",
+                Status.Text = string.format("SNAP LOCKED: %s (Lv.%d) | Dist: %d studs\nHP: %d / %d | Mode: %s\nStatus: INSTANT TP STRIKE ACTIVE",
                     CurrentTarget.Name, lvl, dist, hp, maxHp, Config.TargetMode)
             else
                 Status.Text = "Mode: ACQUIRING TARGET\nSearching eligible bounty targets (PvP ON)..."
