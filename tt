@@ -1,5 +1,5 @@
--- [[ Blox Fruits Stable Overhead Bounty Hunter v69 ]] --
--- Architecture: Overhead Hover (Y+11), BodyVelocity Zero-Inertia, Advanced Combat Hook (bladeHit + RegisterHit), Auto-Aim Skill Engine, Auto PvP Unlock & Buso Haki
+-- [[ Blox Fruits Overhead Bounty Hunter v70 ]] --
+-- Fix: Anti-SafeZone Sticking, Target Blacklisting, Dynamic Re-Targeting, Accurate PvP Check
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -11,7 +11,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
-local Mouse = LocalPlayer:GetMouse()
 
 local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 local RootPart = Character:WaitForChild("HumanoidRootPart")
@@ -20,15 +19,17 @@ local Humanoid = Character:WaitForChild("Humanoid")
 -- [[ Master Configuration ]] --
 local Config = {
     Enabled = false,
-    OverheadDistance = 11,   -- Studs directly above target head
+    OverheadDistance = 11,
     FlySpeed = 350,
     FastAttack = true,
     AutoHaki = true,
-    AutoPvP = true,          -- Auto unlock PvP disabled state
+    AutoPvP = true,
     SkillSpam = true,
     Skills = {"Z", "X", "C", "V"},
     Weapons = {"Melee", "Sword", "Blox Fruit", "Gun"},
-    WeaponSwitchDelay = 1.2
+    WeaponSwitchDelay = 1.0,
+    StuckTimeout = 2.5,        -- วินาทีที่เลือดเป้าหมายไม่ลด ก่อนจะ Blacklist แล้วเปลี่ยนตัว
+    BlacklistDuration = 45     -- ระยะเวลาแบนเป้าหมายที่ไม่สามารถทำดาเมจได้ (วินาที)
 }
 
 local CurrentTarget = nil
@@ -38,14 +39,22 @@ local ActiveController = nil
 local LastWeaponSwitch = 0
 local CurrentWeaponIndex = 1
 
--- [[ Remote References ]] --
+-- Target Tracking & Blacklist Table
+local BlacklistedTargets = {} -- [Player] = ExpireTick
+local TargetTrack = {
+    Player = nil,
+    StartTick = 0,
+    InitialHP = 0
+}
+
+-- [[ Remotes ]] --
 local Remotes = ReplicatedStorage:WaitForChild("Remotes", 5)
 local CommF = Remotes and Remotes:WaitForChild("CommF_", 5)
 local NetModule = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Net")
 local RegisterAttack = NetModule and (NetModule:FindFirstChild("RegisterAttack") or NetModule:FindFirstChild("RE/RegisterAttack"))
 local RegisterHit = NetModule and (NetModule:FindFirstChild("RegisterHit") or NetModule:FindFirstChild("RE/RegisterHit"))
 
--- [[ Physics Anchor & Desync Prevention ]] --
+-- [[ Physics Anchor ]] --
 local function EnsurePhysicsAnchor()
     if not RootPart then return end
     if not BodyVel or BodyVel.Parent ~= RootPart then
@@ -66,7 +75,7 @@ local function RemovePhysicsAnchor()
     end
 end
 
--- [[ Stepped Noclip & Velocity Lock ]] --
+-- [[ Stepped Noclip ]] --
 RunService.Stepped:Connect(function()
     if Config.Enabled and Character then
         for _, part in ipairs(Character:GetDescendants()) do
@@ -81,7 +90,6 @@ RunService.Stepped:Connect(function()
     end
 end)
 
--- [[ Character Lifecycle ]] --
 LocalPlayer.CharacterAdded:Connect(function(char)
     Character = char
     RootPart = char:WaitForChild("HumanoidRootPart")
@@ -91,7 +99,6 @@ LocalPlayer.CharacterAdded:Connect(function(char)
     SetupCombatHooks()
 end)
 
--- [[ Combat Framework Hook ]] --
 function SetupCombatHooks()
     pcall(function()
         local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
@@ -103,34 +110,27 @@ function SetupCombatHooks()
 end
 SetupCombatHooks()
 
--- [[ Auto Enable PvP System ]] --
-local function EnsurePvPEnabled()
-    if not Config.AutoPvP then return end
+-- [[ Auto Enable PvP & Haki ]] --
+local function EnsurePvPAndHaki()
+    if not Character then return end
     pcall(function()
-        if Character:FindFirstChild("PvPDisabled") or (LocalPlayer.PlayerGui:FindFirstChild("Main") and LocalPlayer.PlayerGui.Main:FindFirstChild("Pvp") and LocalPlayer.PlayerGui.Main.Pvp.Visible) then
-            if CommF then
+        if Config.AutoPvP and CommF then
+            if Character:FindFirstChild("PvPDisabled") then
                 CommF:InvokeServer("EnablePvp")
             end
         end
-    end)
-end
-
--- [[ Auto Buso Haki System ]] --
-local function CheckHaki()
-    if not Config.AutoHaki or not Character then return end
-    pcall(function()
-        if not Character:FindFirstChild("HasBuso") then
-            if CommF then
+        if Config.AutoHaki and CommF then
+            if not Character:FindFirstChild("HasBuso") then
                 CommF:InvokeServer("Buso")
             end
         end
     end)
 end
 
--- [[ SafeZone Cache ]] --
+-- [[ Comprehensive SafeZone Cache ]] --
 local SafeZones = {}
 for _, obj in ipairs(Workspace:GetDescendants()) do
-    if (obj.Name == "SafeZone" or obj.Name:lower():find("safezone")) and obj:IsA("BasePart") then
+    if obj:IsA("BasePart") and (obj.Name:lower():find("safezone") or obj.Name:lower():find("peace") or obj.Name == "SafeZone") then
         table.insert(SafeZones, obj)
     end
 end
@@ -140,7 +140,7 @@ local function IsInSafeZone(pos)
         if zone and zone.Parent then
             local rel = zone.CFrame:PointToObjectSpace(pos)
             local sz = zone.Size / 2
-            if math.abs(rel.X) <= sz.X and math.abs(rel.Y) <= sz.Y and math.abs(rel.Z) <= sz.Z then
+            if math.abs(rel.X) <= sz.X + 5 and math.abs(rel.Y) <= sz.Y + 5 and math.abs(rel.Z) <= sz.Z + 5 then
                 return true
             end
         end
@@ -148,32 +148,57 @@ local function IsInSafeZone(pos)
     return false
 end
 
--- [[ Target Selector ]] --
+-- [[ Check if Player has Active PvP & is Vulnerable ]] --
+local function IsValidTarget(player)
+    if not player or player == LocalPlayer then return false end
+    
+    -- Check Blacklist Expiration
+    if BlacklistedTargets[player] then
+        if tick() < BlacklistedTargets[player] then
+            return false
+        else
+            BlacklistedTargets[player] = nil
+        end
+    end
+
+    local char = player.Character
+    if not char then return false end
+
+    local hum = char:FindFirstChild("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not hrp or hum.Health <= 0 then return false end
+
+    -- Check ForceField (Spawn Protection)
+    if char:FindFirstChildOfClass("ForceField") then return false end
+
+    -- Check PvP Disabled Flags (Character & Player Object)
+    if char:FindFirstChild("PvPDisabled") or player:FindFirstChild("PvPDisabled") then return false end
+
+    -- Check SafeZone Positioning
+    if IsInSafeZone(hrp.Position) then return false end
+
+    return true
+end
+
+-- [[ Smart Target Selector ]] --
 local function GetBestTarget()
     local best = nil
     local shortest = math.huge
 
     for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChild("Humanoid") then
-            local char = p.Character
-            local hum = char.Humanoid
-            local hrp = char.HumanoidRootPart
-
-            if hum.Health > 0 and not char:FindFirstChildOfClass("ForceField") and not char:FindFirstChild("PvPDisabled") then
-                if not IsInSafeZone(hrp.Position) then
-                    local dist = (RootPart.Position - hrp.Position).Magnitude
-                    if dist < shortest then
-                        shortest = dist
-                        best = p
-                    end
-                end
+        if IsValidTarget(p) then
+            local hrp = p.Character.HumanoidRootPart
+            local dist = (RootPart.Position - hrp.Position).Magnitude
+            if dist < shortest then
+                shortest = dist
+                best = p
             end
         end
     end
     return best
 end
 
--- [[ Smart Weapon Rotator ]] --
+-- [[ Weapon Rotator ]] --
 local function SwitchToNextWeapon()
     local backpack = LocalPlayer:FindFirstChild("Backpack")
     if not backpack or not Character or not Humanoid then return end
@@ -181,7 +206,6 @@ local function SwitchToNextWeapon()
     local category = Config.Weapons[CurrentWeaponIndex]
     local targetTool = nil
 
-    -- Find matching weapon tool in Backpack or Character
     for _, tool in ipairs(backpack:GetChildren()) do
         if tool:IsA("Tool") then
             local tType = tool:GetAttribute("WeaponType") or tool.ToolTip
@@ -199,78 +223,54 @@ local function SwitchToNextWeapon()
     CurrentWeaponIndex = (CurrentWeaponIndex % #Config.Weapons) + 1
 end
 
--- [[ Real Fast Attack & Packet Hit Registration Engine ]] --
+-- [[ Attack Register Engine ]] --
 local function ExecuteFastAttack(targetHRP)
     if not Config.FastAttack or not targetHRP then return end
 
-    -- 1. Direct BladeHit / Hitbox Bypass
     pcall(function()
-        if not ActiveController then
-            SetupCombatHooks()
-        end
+        if not ActiveController then SetupCombatHooks() end
         if ActiveController then
             ActiveController.timeToNextAttack = 0
             ActiveController.attacking = false
             ActiveController.blocking = false
-            ActiveController.hitboxMagnitude = 80
+            ActiveController.hitboxMagnitude = 85
             ActiveController.increment = 3
-            if ActiveController.attack then
-                ActiveController:attack()
-            end
-            if ActiveController.bladeHit then
-                ActiveController.bladeHit(targetHRP, {targetHRP})
-            end
+            if ActiveController.attack then ActiveController:attack() end
+            if ActiveController.bladeHit then ActiveController.bladeHit(targetHRP, {targetHRP}) end
         end
     end)
 
-    -- 2. Net Remote Attack Registration
     pcall(function()
-        if RegisterAttack then
-            RegisterAttack:FireServer(0)
-        end
-        if RegisterHit then
-            local hitTable = {{targetHRP.Parent, targetHRP}}
-            RegisterHit:FireServer(targetHRP, hitTable)
-        end
+        if RegisterAttack then RegisterAttack:FireServer(0) end
+        if RegisterHit then RegisterHit:FireServer(targetHRP, {{targetHRP.Parent, targetHRP}}) end
     end)
 
-    -- 3. Tool Click Emulation & Hardware Input Fallback
     local currentTool = Character:FindFirstChildOfClass("Tool")
-    if currentTool then
-        currentTool:Activate()
-    end
+    if currentTool then currentTool:Activate() end
     VirtualUser:CaptureController()
     VirtualUser:Button1Down(Vector2.new(0, 0))
     VirtualUser:Button1Up(Vector2.new(0, 0))
 end
 
--- [[ Direct Camera & Skill Vector Aim ]] --
-local function AimAtTarget(targetPos)
-    pcall(function()
-        Camera.CFrame = CFrame.new(Camera.CFrame.Position, targetPos)
-    end)
-end
-
--- [[ Skill Execution Engine ]] --
+-- [[ Camera Aim & Skill Cast ]] --
 local function FireSkills(targetHRP, targetHum)
     if not Config.SkillSpam or not targetHRP or targetHum.Health <= 0 then return end
+    pcall(function()
+        Camera.CFrame = CFrame.new(Camera.CFrame.Position, targetHRP.Position)
+    end)
 
-    AimAtTarget(targetHRP.Position)
     for _, key in ipairs(Config.Skills) do
         if not CurrentTarget or targetHum.Health <= 0 then break end
-        
-        AimAtTarget(targetHRP.Position)
         VirtualInputManager:SendKeyEvent(true, Enum.KeyCode[key], false, game)
-        task.wait(0.05)
+        task.wait(0.04)
         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode[key], false, game)
-        task.wait(0.08)
+        task.wait(0.06)
     end
 end
 
--- [[ Overhead Positioning Engine ]] --
+-- [[ Overhead Hover Movement ]] --
 local function HoverOverhead(targetHRP)
     EnsurePhysicsAnchor()
-    
     local overheadCFrame = CFrame.new(targetHRP.Position + Vector3.new(0, Config.OverheadDistance, 0)) * CFrame.Angles(math.rad(-90), 0, 0)
     local currentPos = RootPart.Position
     local targetPos = overheadCFrame.Position
@@ -283,47 +283,64 @@ local function HoverOverhead(targetHRP)
     end
 end
 
--- [[ Master Combat Loop ]] --
+-- [[ Master Combat Loop with Anti-Stuck Damage Engine ]] --
 task.spawn(function()
     while true do
         task.wait(0.015)
         
         if Config.Enabled then
-            EnsurePvPEnabled()
-            CheckHaki()
+            EnsurePvPAndHaki()
 
-            -- Validate Target
-            if not CurrentTarget 
-                or not CurrentTarget.Character 
-                or not CurrentTarget.Character:FindFirstChild("Humanoid") 
-                or not CurrentTarget.Character:FindFirstChild("HumanoidRootPart")
-                or CurrentTarget.Character.Humanoid.Health <= 0 
-                or CurrentTarget.Character:FindFirstChild("PvPDisabled")
-                or IsInSafeZone(CurrentTarget.Character.HumanoidRootPart.Position) then
+            -- ตรวจสอบว่าเป้าหมายปัจจุบันยัง Valid หรือไม่
+            if not CurrentTarget or not IsValidTarget(CurrentTarget) then
                 CurrentTarget = GetBestTarget()
+                if CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") then
+                    TargetTrack.Player = CurrentTarget
+                    TargetTrack.StartTick = tick()
+                    TargetTrack.InitialHP = CurrentTarget.Character.Humanoid.Health
+                else
+                    TargetTrack.Player = nil
+                end
             end
 
             if CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("HumanoidRootPart") then
                 local tHRP = CurrentTarget.Character.HumanoidRootPart
                 local tHum = CurrentTarget.Character.Humanoid
 
-                -- Lock Position Overhead
-                HoverOverhead(tHRP)
-
-                -- Weapon Switch Timer
-                if tick() - LastWeaponSwitch >= Config.WeaponSwitchDelay then
-                    SwitchToNextWeapon()
-                    LastWeaponSwitch = tick()
+                -- ระบบตรวจจับดาเมจ (Anti-Stuck Damage Check)
+                if TargetTrack.Player == CurrentTarget then
+                    local elapsed = tick() - TargetTrack.StartTick
+                    if elapsed >= Config.StuckTimeout then
+                        -- ถ้าเวลาผ่านไปแล้วเลือดยังไม่ลดเลย = เป้าหมายอยู่ในเซฟโซนที่เช็คไม่เจอ หรือ ปิด PvP อยู่
+                        if tHum.Health >= TargetTrack.InitialHP then
+                            BlacklistedTargets[CurrentTarget] = tick() + Config.BlacklistDuration
+                            CurrentTarget = nil
+                            TargetTrack.Player = nil
+                        else
+                            -- ทำดาเมจเข้า รีเซ็ตตัวนับ
+                            TargetTrack.StartTick = tick()
+                            TargetTrack.InitialHP = tHum.Health
+                        end
+                    end
+                else
+                    TargetTrack.Player = CurrentTarget
+                    TargetTrack.StartTick = tick()
+                    TargetTrack.InitialHP = tHum.Health
                 end
 
-                -- Range Check for Attack Delivery
-                local dist = (RootPart.Position - tHRP.Position).Magnitude
-                if dist <= (Config.OverheadDistance + 15) then
-                    -- Execute M1 Fast Attack
-                    ExecuteFastAttack(tHRP)
+                if CurrentTarget then
+                    HoverOverhead(tHRP)
 
-                    -- Cast Aimed Skills
-                    FireSkills(tHRP, tHum)
+                    if tick() - LastWeaponSwitch >= Config.WeaponSwitchDelay then
+                        SwitchToNextWeapon()
+                        LastWeaponSwitch = tick()
+                    end
+
+                    local dist = (RootPart.Position - tHRP.Position).Magnitude
+                    if dist <= (Config.OverheadDistance + 15) then
+                        ExecuteFastAttack(tHRP)
+                        FireSkills(tHRP, tHum)
+                    end
                 end
             end
         else
@@ -332,7 +349,7 @@ task.spawn(function()
     end
 end)
 
--- [[ UI Interface ]] --
+-- [[ UI ]] --
 local function BuildUI()
     local ScreenGui = Instance.new("ScreenGui")
     ScreenGui.Name = "OnyxOverheadHub"
@@ -344,7 +361,7 @@ local function BuildUI()
     local Main = Instance.new("Frame", ScreenGui)
     Main.Size = UDim2.new(0, 320, 0, 270)
     Main.Position = UDim2.new(0.5, -160, 0.25, 0)
-    Main.BackgroundColor3 = Color3.fromRGB(15, 15, 22)
+    Main.BackgroundColor3 = Color3.fromRGB(14, 14, 20)
     Main.BorderSizePixel = 0
     Main.Active = true
     Main.Draggable = true
@@ -353,12 +370,12 @@ local function BuildUI()
     Corner.CornerRadius = UDim.new(0, 8)
 
     local Stroke = Instance.new("UIStroke", Main)
-    Stroke.Color = Color3.fromRGB(80, 85, 120)
+    Stroke.Color = Color3.fromRGB(80, 85, 125)
     Stroke.Thickness = 1.5
 
     local Header = Instance.new("TextLabel", Main)
     Header.Size = UDim2.new(1, 0, 0, 36)
-    Header.Text = "BLOXRUITS OVERHEAD BOUNTY v69"
+    Header.Text = "BLOXRUITS BOUNTY v70 (ANTI-STUCK)"
     Header.TextColor3 = Color3.fromRGB(240, 240, 255)
     Header.Font = Enum.Font.GothamBold
     Header.TextSize = 12
@@ -371,14 +388,14 @@ local function BuildUI()
     Toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
     Toggle.Font = Enum.Font.GothamBold
     Toggle.TextSize = 13
-    Toggle.Text = "AUTO BOUNTY HUNTER: OFF"
+    Toggle.Text = "AUTO BOUNTY: OFF"
     local tCorner = Instance.new("UICorner", Toggle)
     tCorner.CornerRadius = UDim.new(0, 6)
 
     Toggle.MouseButton1Click:Connect(function()
         Config.Enabled = not Config.Enabled
         Toggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(45, 160, 95) or Color3.fromRGB(35, 35, 48)
-        Toggle.Text = "AUTO BOUNTY HUNTER: " .. (Config.Enabled and "ENABLED (HUNTING)" or "OFF")
+        Toggle.Text = "AUTO BOUNTY: " .. (Config.Enabled and "ACTIVE (HUNTING)" or "OFF")
         if not Config.Enabled then
             RemovePhysicsAnchor()
             CurrentTarget = nil
@@ -388,12 +405,12 @@ local function BuildUI()
     local Status = Instance.new("TextLabel", Main)
     Status.Size = UDim2.new(0.9, 0, 0, 150)
     Status.Position = UDim2.new(0.05, 0, 0, 98)
-    Status.BackgroundColor3 = Color3.fromRGB(22, 22, 32)
+    Status.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
     Status.TextColor3 = Color3.fromRGB(200, 220, 255)
     Status.Font = Enum.Font.Gotham
     Status.TextSize = 12
     Status.TextWrapped = true
-    Status.Text = "Status: Idle. Standing by..."
+    Status.Text = "Status: Idle"
     local sCorner = Instance.new("UICorner", Status)
     sCorner.CornerRadius = UDim.new(0, 6)
 
@@ -401,14 +418,14 @@ local function BuildUI()
         while ScreenGui.Parent do
             task.wait(0.25)
             if not Config.Enabled then
-                Status.Text = "Mode: IDLE\nAuto Buso Haki: READY\nAuto PvP Unlock: READY\nOverhead Position: Y+11 Studs"
+                Status.Text = "Mode: IDLE\nAnti-SafeZone & PvP Filter: ACTIVE\nAnti-Stuck Damage Engine: READY"
             elseif CurrentTarget and CurrentTarget.Character and CurrentTarget.Character:FindFirstChild("Humanoid") then
                 local hp = math.floor(CurrentTarget.Character.Humanoid.Health)
                 local maxHp = math.floor(CurrentTarget.Character.Humanoid.MaxHealth)
-                Status.Text = string.format("Locked Target: %s\nTarget HP: %d / %d\nWeapon Cycle: %s\nM1 Fast Attack: ACTIVE\nAim & Skills (Z,X,C,V): FIRING\nBuso & PvP: ENFORCED",
+                Status.Text = string.format("Target: %s\nHP: %d / %d\nWeapon: %s\nAnti-Stuck Monitor: TRACKING DAMAGE\nBuso & PvP: ENFORCED",
                     CurrentTarget.Name, hp, maxHp, Config.Weapons[CurrentWeaponIndex] or "Melee")
             else
-                Status.Text = "Mode: HUNTING\nScanning nearest valid PvP targets outside safezones..."
+                Status.Text = "Mode: SCANNING\nSearching valid targets (Filtering Safezones / No-PvP / Blacklisted)..."
             end
         end
     end)
